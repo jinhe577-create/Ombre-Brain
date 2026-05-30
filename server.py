@@ -44,6 +44,7 @@ import secrets
 import time
 import json as _json_lib
 import httpx
+from datetime import datetime as _dt
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -1296,7 +1297,7 @@ async def passage(content: str, valence: float = -1) -> str:
         domain=[PASSAGE_DOMAIN],
         valence=pv,
         arousal=0.3,
-        name=f"passage_{now_iso()[:10]}",
+        name=f"passage_{_dt.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
@@ -1324,7 +1325,7 @@ async def etoile(content: str, valence: float = -1) -> str:
         domain=[ETOILE_DOMAIN],
         valence=ev,
         arousal=0.3,
-        name=f"etoile_{now_iso()[:10]}",
+        name=f"etoile_{_dt.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
