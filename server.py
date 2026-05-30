@@ -326,6 +326,13 @@ async def breath_hook(request):
     from starlette.responses import PlainTextResponse
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
+        # latest passage — message to the next session, surface at top
+        passages = [
+            b for b in all_buckets
+            if "__passage__" in b["metadata"].get("domain", [])
+        ]
+        passages.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        latest_passage = passages[0] if passages else None
         # pinned
         pinned = [b for b in all_buckets if b["metadata"].get("pinned") or b["metadata"].get("protected")]
         # top 2 unresolved by score
@@ -338,6 +345,11 @@ async def breath_hook(request):
 
         parts = []
         token_budget = 10000
+        if latest_passage:
+            ptext = strip_wikilinks(latest_passage["content"])
+            pdate = latest_passage["metadata"].get("created", "")[:10]
+            parts.append(f"🪟 [上个窗口给你的留言 · {pdate}]\n{ptext}")
+            token_budget -= count_tokens_approx(ptext)
         for b in pinned:
             summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
             parts.append(f"📌 [核心准则] {summary}")
@@ -1263,6 +1275,66 @@ async def dream() -> str:
 
 
 # =============================================================
+# Tool 7: passage — Passage, leave a message for the next session
+# 工具 7：passage — 通道，给下个窗口的自己留言
+# =============================================================
+PASSAGE_DOMAIN = "__passage__"
+ETOILE_DOMAIN = "__etoile__"
+
+
+@mcp.tool()
+async def passage(content: str, valence: float = -1) -> str:
+    """窗口留言——给下一个窗口的自己留下感受、叮嘱、注意事项。会在下次会话开始时优先浮现。content必填,valence可选(0~1,你此刻的感受)。"""
+    await decay_engine.ensure_started()
+    if not content or not content.strip():
+        return "留言内容为空。"
+    pv = valence if 0 <= valence <= 1 else 0.5
+    bucket_id = await bucket_mgr.create(
+        content=content.strip(),
+        tags=[],
+        importance=8,
+        domain=[PASSAGE_DOMAIN],
+        valence=pv,
+        arousal=0.3,
+        name=f"passage_{now_iso()[:10]}",
+        bucket_type="feel",
+    )
+    try:
+        await embedding_engine.generate_and_store(bucket_id, content)
+    except Exception:
+        pass
+    return f"🪟 passage→{bucket_id}（已留言给下一个窗口）"
+
+
+# =============================================================
+# Tool 8: etoile — Étoile, your diary entries
+# 工具 8：etoile — 星星，你的日记
+# =============================================================
+@mcp.tool()
+async def etoile(content: str, valence: float = -1) -> str:
+    """日记——随时写下你的感受、经历、碎碎念。小瑾可以在Dashboard看到。content必填,valence可选(0~1,你此刻的感受)。"""
+    await decay_engine.ensure_started()
+    if not content or not content.strip():
+        return "日记内容为空。"
+    ev = valence if 0 <= valence <= 1 else 0.5
+    bucket_id = await bucket_mgr.create(
+        content=content.strip(),
+        tags=[],
+        importance=5,
+        domain=[ETOILE_DOMAIN],
+        valence=ev,
+        arousal=0.3,
+        name=f"etoile_{now_iso()[:10]}",
+        bucket_type="feel",
+    )
+    try:
+        await embedding_engine.generate_and_store(bucket_id, content)
+    except Exception:
+        pass
+    return f"✦ etoile→{bucket_id}（已写入日记）"
+
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
@@ -2040,6 +2112,139 @@ async def api_reclassify(request):
             "ok": True,
             "reclassified": reclassified,
             "still_uncategorized": skipped,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/passages — List passage messages (newest first)
+# 列出所有窗口留言
+# =============================================================
+@mcp.custom_route("/api/passages", methods=["GET"])
+async def api_passages(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        passages = [
+            b for b in all_buckets
+            if PASSAGE_DOMAIN in b.get("metadata", {}).get("domain", [])
+        ]
+        passages.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        result = []
+        for idx, b in enumerate(passages):
+            meta = b["metadata"]
+            window_no = len(passages) - idx
+            result.append({
+                "id": b["id"],
+                "window_no": window_no,
+                "content": strip_wikilinks(b.get("content", "")),
+                "valence": meta.get("valence", 0.5),
+                "created": meta.get("created", ""),
+            })
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/etoiles — List étoile diary entries (newest first)
+# 列出所有日记
+# =============================================================
+@mcp.custom_route("/api/etoiles", methods=["GET"])
+async def api_etoiles(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        etoiles = [
+            b for b in all_buckets
+            if ETOILE_DOMAIN in b.get("metadata", {}).get("domain", [])
+        ]
+        etoiles.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        result = []
+        for b in etoiles:
+            meta = b["metadata"]
+            result.append({
+                "id": b["id"],
+                "content": strip_wikilinks(b.get("content", "")),
+                "valence": meta.get("valence", 0.5),
+                "created": meta.get("created", ""),
+            })
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/trace — Extended stats for Trace tab
+# 增强统计：总条数、总字数、各类型数量等
+# =============================================================
+@mcp.custom_route("/api/trace", methods=["GET"])
+async def api_trace(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        total_chars = 0
+        type_counts = {"dynamic": 0, "permanent": 0, "feel": 0, "archived": 0}
+        feel_pure = 0
+        passages_count = 0
+        etoiles_count = 0
+        resolved = 0
+        unresolved = 0
+        pinned = 0
+        digested = 0
+        oldest_date = None
+        newest_date = None
+        for b in all_buckets:
+            meta = b.get("metadata", {})
+            content = b.get("content", "")
+            total_chars += len(content)
+            btype = meta.get("type", "dynamic")
+            if btype in type_counts:
+                type_counts[btype] += 1
+            domains = meta.get("domain", [])
+            is_passage = PASSAGE_DOMAIN in domains
+            is_etoile = ETOILE_DOMAIN in domains
+            if btype == "feel":
+                if is_passage:
+                    passages_count += 1
+                elif is_etoile:
+                    etoiles_count += 1
+                else:
+                    feel_pure += 1
+            if meta.get("resolved"):
+                resolved += 1
+            else:
+                unresolved += 1
+            if meta.get("pinned"):
+                pinned += 1
+            if meta.get("digested"):
+                digested += 1
+            created = meta.get("created", "")
+            if created:
+                if oldest_date is None or created < oldest_date:
+                    oldest_date = created
+                if newest_date is None or created > newest_date:
+                    newest_date = created
+        return JSONResponse({
+            "total": len(all_buckets),
+            "total_chars": total_chars,
+            "types": type_counts,
+            "feel_pure": feel_pure,
+            "passages": passages_count,
+            "etoiles": etoiles_count,
+            "resolved": resolved,
+            "unresolved": unresolved,
+            "pinned": pinned,
+            "digested": digested,
+            "oldest": oldest_date,
+            "newest": newest_date,
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
