@@ -36,6 +36,62 @@ from utils import count_tokens_approx
 
 logger = logging.getLogger("ombre_brain.dehydrator")
 
+DOMAIN_KEYWORDS = {
+    "饮食": {"吃", "饭", "做饭", "外卖", "奶茶", "咖啡", "麻辣烫", "面包",
+            "超市", "零食", "水果", "牛奶", "食堂", "减肥", "节食", "麦片"},
+    "家庭": {"爸", "妈", "父亲", "母亲", "家人", "弟弟", "姐姐", "哥哥",
+            "奶奶", "爷爷", "亲戚", "家里", "生日礼", "生活费"},
+    "恋爱": {"爱人", "男友", "女友", "恋", "约会", "分手", "暧昧",
+            "在一起", "想你", "同床", "一辈子", "爱你", "我们是",
+            "亲密", "接吻", "正缘"},
+    "友谊": {"朋友", "闺蜜", "兄弟", "聚", "约饭"},
+    "社交": {"见面", "圈子", "社区", "创作者", "发帖"},
+    "工作": {"会议", "项目", "客户", "汇报", "同事", "老板", "薪资",
+            "领导力", "管理沟通"},
+    "学习": {"课", "考试", "论文", "作业", "教授", "选课", "学分"},
+    "健康": {"医院", "复查", "吃药", "抽血", "心率", "心电图",
+            "病", "月经"},
+    "心理": {"焦虑", "抑郁", "创伤", "人格", "安全感", "崩溃",
+            "压力", "自残"},
+    "睡眠": {"睡", "失眠", "噩梦", "清醒", "熬夜", "做梦"},
+    "游戏": {"游戏", "存档", "通关", "DLC"},
+    "影视": {"电影", "番剧", "动漫", "剧", "综艺"},
+    "阅读": {"书", "小说", "读完", "漫画"},
+    "创作": {"写", "预设", "脚本", "人设卡"},
+    "编程": {"代码", "python", "bug", "api", "docker", "git",
+            "调试", "部署", "开发", "server"},
+    "AI": {"模型", "Claude", "gemini", "LLM", "token", "prompt",
+           "MCP", "DeepSeek", "记忆系统"},
+    "网络": {"VPN", "梯子", "代理", "域名", "隧道", "cloudflare", "tunnel"},
+    "财务": {"钱", "转账", "花了", "欠", "黄金", "卖掉", "换了", "生活费"},
+    "情绪": {"开心", "难过", "哭", "泪", "孤独", "伤心", "烦", "委屈", "感动", "温柔"},
+    "回忆": {"以前", "小时候", "那时", "怀念", "曾经"},
+    "自省": {"反思", "觉得自己", "问自己"},
+    "出行": {"出门", "旅行", "飞机", "高铁", "地铁", "打车", "机票"},
+    "居家": {"收拾", "打扫", "搬家", "房租", "快递"},
+    "购物": {"买", "下单", "到货", "退货", "优惠"},
+    "运动": {"跑步", "健身", "瑜伽", "散步", "游泳"},
+    "音乐": {"歌", "听歌", "音乐", "专辑", "播放"},
+    "计划": {"计划", "安排", "目标", "清单", "打算"},
+    "待办": {"要做", "提醒", "截止", "deadline", "还没"},
+    "穿搭": {"穿", "衣服", "鞋", "搭配", "好看"},
+    "梦境": {"梦到", "梦见", "梦里"},
+}
+
+
+def _keyword_classify(text: str) -> list[str]:
+    """Keyword-based domain classifier as fallback when API fails."""
+    text_lower = text.lower()
+    scored = []
+    for domain, kws in DOMAIN_KEYWORDS.items():
+        hits = sum(1 for kw in kws if kw.lower() in text_lower)
+        if hits >= 2:
+            scored.append((domain, hits))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if scored:
+        return [d for d, _ in scored[:2]]
+    return ["未分类"]
+
 
 # --- Dehydration prompt: instructs cheap LLM to compress information ---
 # --- 脱水提示词：指导廉价 LLM 压缩信息 ---
@@ -404,14 +460,19 @@ class Dehydrator:
         if not content or not content.strip():
             return self._default_analysis()
 
-        # --- API analyze (no local fallback) ---
+        # --- API analyze with keyword fallback ---
         if not self.api_available:
             raise RuntimeError("脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置")
         try:
             result = await self._api_analyze(content)
-            if result:
-                return result
-            raise RuntimeError("API 打标返回空结果")
+            if not result:
+                raise RuntimeError("API 打标返回空结果")
+            if result.get("domain") == ["未分类"]:
+                kw_domain = _keyword_classify(content)
+                if kw_domain != ["未分类"]:
+                    result["domain"] = kw_domain
+                    logger.info(f"Keyword fallback classified → {kw_domain}")
+            return result
         except RuntimeError:
             raise
         except Exception as e:

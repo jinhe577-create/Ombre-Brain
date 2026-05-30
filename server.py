@@ -34,6 +34,7 @@
 
 import os
 import sys
+import re
 import random
 import logging
 import asyncio
@@ -832,9 +833,10 @@ async def hold(
     try:
         analysis = await dehydrator.analyze(content)
     except Exception as e:
-        logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
+        logger.warning(f"Auto-tagging failed, using keyword fallback / 自动打标失败，使用关键词回退: {e}")
+        from dehydrator import _keyword_classify
         analysis = {
-            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "domain": _keyword_classify(content), "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "",
         }
 
@@ -908,9 +910,10 @@ async def grow(content: str) -> str:
         try:
             analysis = await dehydrator.analyze(content)
         except Exception as e:
-            logger.warning(f"Fast-path analyze failed / 快速路径打标失败: {e}")
+            logger.warning(f"Fast-path analyze failed, using keyword fallback / 快速路径打标失败: {e}")
+            from dehydrator import _keyword_classify
             analysis = {
-                "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+                "domain": _keyword_classify(content), "valence": 0.5, "arousal": 0.3,
                 "tags": [], "suggested_name": "",
             }
         result_name, is_merged = await _merge_or_create(
@@ -1900,6 +1903,182 @@ async def api_system_status(request):
             },
             "using_env_password": bool(os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")),
             "version": "1.3.0",
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/export/json — Export all memories as JSON
+# 导出所有记忆为 JSON
+# =============================================================
+@mcp.custom_route("/api/export/json", methods=["GET"])
+async def api_export_json(request):
+    """Export all memory buckets as a JSON file."""
+    from starlette.responses import Response
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        export_data = []
+        for b in all_buckets:
+            meta = b.get("metadata", {})
+            export_data.append({
+                "id": b["id"],
+                "name": meta.get("name", b["id"]),
+                "type": meta.get("type", "dynamic"),
+                "domain": meta.get("domain", []),
+                "tags": meta.get("tags", []),
+                "valence": meta.get("valence", 0.5),
+                "arousal": meta.get("arousal", 0.3),
+                "model_valence": meta.get("model_valence"),
+                "importance": meta.get("importance", 5),
+                "resolved": meta.get("resolved", False),
+                "pinned": meta.get("pinned", False),
+                "digested": meta.get("digested", False),
+                "created": meta.get("created", ""),
+                "last_active": meta.get("last_active", ""),
+                "activation_count": meta.get("activation_count", 1),
+                "content": b.get("content", ""),
+            })
+        json_bytes = _json_lib.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content=json_bytes,
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=ombre_brain_export.json"},
+        )
+    except Exception as e:
+        from starlette.responses import JSONResponse
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/export/markdown — Export all memories as ZIP of .md files
+# 导出所有记忆为 Markdown ZIP 包
+# =============================================================
+@mcp.custom_route("/api/export/markdown", methods=["GET"])
+async def api_export_markdown(request):
+    """Export all memory buckets as a ZIP of Markdown files."""
+    import io
+    import zipfile
+    from starlette.responses import Response
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for b in all_buckets:
+                meta = b.get("metadata", {})
+                bucket_type = meta.get("type", "dynamic")
+                domains = meta.get("domain", ["未分类"])
+                primary_domain = domains[0] if domains else "未分类"
+                safe_name = re.sub(r'[^\w一-鿿\s-]', '', meta.get("name", b["id"]))[:60] or b["id"]
+                filepath = f"{bucket_type}/{primary_domain}/{safe_name}_{b['id'][:8]}.md"
+
+                frontmatter_lines = [
+                    "---",
+                    f"id: {b['id']}",
+                    f"name: \"{meta.get('name', '')}\"",
+                    f"domain: [{', '.join(domains)}]",
+                    f"valence: {meta.get('valence', 0.5)}",
+                    f"arousal: {meta.get('arousal', 0.3)}",
+                    f"importance: {meta.get('importance', 5)}",
+                    f"type: {bucket_type}",
+                    f"resolved: {str(meta.get('resolved', False)).lower()}",
+                    f"pinned: {str(meta.get('pinned', False)).lower()}",
+                    f"created: {meta.get('created', '')}",
+                    f"last_active: {meta.get('last_active', '')}",
+                    f"tags: [{', '.join(meta.get('tags', []))}]",
+                    "---",
+                    "",
+                ]
+                md_content = "\n".join(frontmatter_lines) + b.get("content", "")
+                zf.writestr(filepath, md_content)
+
+        buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=ombre_brain_export.zip"},
+        )
+    except Exception as e:
+        from starlette.responses import JSONResponse
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/reclassify — Batch reclassify "未分类" buckets
+# 批量重分类"未分类"桶
+# =============================================================
+@mcp.custom_route("/api/reclassify", methods=["POST"])
+async def api_reclassify(request):
+    """Reclassify all '未分类' buckets using keyword matching."""
+    from starlette.responses import JSONResponse
+    from dehydrator import _keyword_classify
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        reclassified = 0
+        skipped = 0
+        for b in all_buckets:
+            meta = b.get("metadata", {})
+            domains = meta.get("domain", [])
+            if meta.get("type") == "feel":
+                continue
+            if domains != ["未分类"]:
+                continue
+            content = b.get("content", "")
+            new_domain = _keyword_classify(content)
+            if new_domain != ["未分类"]:
+                await bucket_mgr.update(b["id"], domain=new_domain)
+                reclassified += 1
+            else:
+                skipped += 1
+        return JSONResponse({
+            "ok": True,
+            "reclassified": reclassified,
+            "still_uncategorized": skipped,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
+# /api/domain-stats — Domain distribution statistics
+# 域分布统计
+# =============================================================
+@mcp.custom_route("/api/domain-stats", methods=["GET"])
+async def api_domain_stats(request):
+    """Return domain distribution statistics."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        domain_counts = {}
+        type_counts = {"dynamic": 0, "permanent": 0, "feel": 0, "archived": 0}
+        total_resolved = 0
+        total_unresolved = 0
+        for b in all_buckets:
+            meta = b.get("metadata", {})
+            btype = meta.get("type", "dynamic")
+            if btype in type_counts:
+                type_counts[btype] += 1
+            for d in meta.get("domain", ["未分类"]):
+                domain_counts[d] = domain_counts.get(d, 0) + 1
+            if meta.get("resolved"):
+                total_resolved += 1
+            else:
+                total_unresolved += 1
+        sorted_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)
+        return JSONResponse({
+            "domains": [{"name": d, "count": c} for d, c in sorted_domains],
+            "types": type_counts,
+            "resolved": total_resolved,
+            "unresolved": total_unresolved,
+            "total": len(all_buckets),
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

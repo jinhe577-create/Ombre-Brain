@@ -616,6 +616,7 @@
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
   <div class="tab" data-tab="import">导入</div>
+  <div class="tab" data-tab="export">导出</div>
   <div class="tab" data-tab="settings">设置</div>
 </div>
 
@@ -778,6 +779,42 @@
 <div class="detail-panel" id="detail-panel">
   <button class="close-btn" onclick="closeDetail()">✕</button>
   <div id="detail-content"></div>
+</div>
+
+<!-- Export Tab View -->
+<div class="content" id="export-view" style="display:none">
+  <div style="max-width:720px;margin:0 auto;">
+    <h3>导出记忆</h3>
+    <p style="color:var(--text-dim);font-size:13px;margin-bottom:20px;">导出所有记忆桶（包含归档），支持 JSON 和 Markdown ZIP 两种格式。</p>
+
+    <div style="display:flex;gap:16px;margin-bottom:30px;flex-wrap:wrap;">
+      <button onclick="exportJSON()" style="padding:14px 28px;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:14px;flex:1;min-width:200px;">
+        <div style="font-size:24px;margin-bottom:6px;">📄</div>
+        <div style="font-weight:600;">导出为 JSON</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">单个文件，含全部元数据和内容</div>
+      </button>
+      <button onclick="exportMarkdown()" style="padding:14px 28px;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:14px;flex:1;min-width:200px;">
+        <div style="font-size:24px;margin-bottom:6px;">📦</div>
+        <div style="font-weight:600;">导出为 Markdown ZIP</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">按 类型/域 目录分组，Obsidian 兼容</div>
+      </button>
+    </div>
+    <div id="export-msg" style="font-size:13px;margin-bottom:20px;"></div>
+
+    <div class="config-section">
+      <h3>域分布统计</h3>
+      <div id="domain-stats-chart" style="min-height:120px;color:var(--text-dim);font-size:13px;">加载中…</div>
+    </div>
+
+    <div class="config-section">
+      <h3>批量重分类</h3>
+      <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px;">将所有「未分类」记忆桶通过关键词匹配重新分类。不会影响已有分类的桶。</p>
+      <button onclick="doReclassify()" id="reclassify-btn" style="padding:10px 20px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;">
+        重新分类「未分类」桶
+      </button>
+      <div id="reclassify-msg" style="font-size:13px;margin-top:10px;"></div>
+    </div>
+  </div>
 </div>
 
 <!-- Settings Tab View -->
@@ -1047,10 +1084,12 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    document.getElementById('export-view').style.display = target === 'export' ? '' : 'none';
     document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
+    if (target === 'export') loadDomainStats();
     if (target === 'settings') loadSettingsStatus();
   });
 });
@@ -1647,6 +1686,92 @@ async function batchReview(idsJson, action) {
     detectPatterns();
   } catch(e) {}
 }
+
+// ============ Export & Reclassify ============
+
+function exportJSON() {
+  var msg = document.getElementById('export-msg');
+  msg.textContent = '正在导出 JSON…';
+  msg.style.color = 'var(--text-dim)';
+  var a = document.createElement('a');
+  a.href = BASE + '/api/export/json';
+  a.download = 'ombre_brain_export.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function() { msg.textContent = 'JSON 导出已开始下载'; msg.style.color = 'var(--accent)'; }, 500);
+}
+
+function exportMarkdown() {
+  var msg = document.getElementById('export-msg');
+  msg.textContent = '正在打包 Markdown ZIP…';
+  msg.style.color = 'var(--text-dim)';
+  var a = document.createElement('a');
+  a.href = BASE + '/api/export/markdown';
+  a.download = 'ombre_brain_export.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function() { msg.textContent = 'Markdown ZIP 导出已开始下载'; msg.style.color = 'var(--accent)'; }, 500);
+}
+
+async function doReclassify() {
+  var btn = document.getElementById('reclassify-btn');
+  var msg = document.getElementById('reclassify-msg');
+  btn.disabled = true;
+  btn.textContent = '重分类中…';
+  msg.textContent = '';
+  try {
+    var resp = await fetch(BASE + '/api/reclassify', { method: 'POST' });
+    var data = await resp.json();
+    if (data.ok) {
+      msg.style.color = 'var(--accent)';
+      msg.textContent = '完成：' + data.reclassified + ' 个桶已重分类，' + data.still_uncategorized + ' 个仍为未分类';
+      loadBuckets();
+      loadDomainStats();
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = '失败: ' + (data.error || '未知错误');
+    }
+  } catch(e) {
+    msg.style.color = 'var(--negative)';
+    msg.textContent = '请求失败: ' + e;
+  }
+  btn.disabled = false;
+  btn.textContent = '重新分类「未分类」桶';
+}
+
+async function loadDomainStats() {
+  var container = document.getElementById('domain-stats-chart');
+  try {
+    var resp = await fetch(BASE + '/api/domain-stats');
+    var data = await resp.json();
+    if (!data.domains || !data.domains.length) {
+      container.textContent = '暂无数据';
+      return;
+    }
+    var maxCount = data.domains[0].count;
+    var html = '<div style="margin-bottom:12px;font-size:12px;color:var(--text-dim);">' +
+      '共 ' + data.total + ' 个桶 · ' + data.unresolved + ' 未解决 · ' + data.resolved + ' 已解决</div>';
+    html += data.domains.map(function(d) {
+      var pct = Math.round(d.count / data.total * 100);
+      var barWidth = Math.max(4, Math.round(d.count / maxCount * 100));
+      var isUncategorized = d.name === '未分类';
+      var barColor = isUncategorized ? 'var(--warning, #B8860B)' : 'var(--accent, #2F4F4F)';
+      return '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;">' +
+        '<span style="min-width:60px;text-align:right;color:' + (isUncategorized ? 'var(--warning, #B8860B)' : 'var(--text)') + ';">' + d.name + '</span>' +
+        '<div style="flex:1;height:18px;background:var(--bg);border-radius:4px;overflow:hidden;">' +
+          '<div style="width:' + barWidth + '%;height:100%;background:' + barColor + ';border-radius:4px;transition:width .3s;"></div>' +
+        '</div>' +
+        '<span style="min-width:50px;font-size:11px;color:var(--text-dim);">' + d.count + ' (' + pct + '%)</span>' +
+      '</div>';
+    }).join('');
+    container.innerHTML = html;
+  } catch(e) {
+    container.textContent = '加载失败: ' + e;
+  }
+}
+
 </script>
 </body>
 </html>
