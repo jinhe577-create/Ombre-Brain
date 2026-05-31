@@ -44,6 +44,7 @@ import secrets
 import time
 import json as _json_lib
 import httpx
+from datetime import datetime as _dt
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -57,7 +58,7 @@ from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
+from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, now_iso
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -1285,6 +1286,7 @@ ETOILE_DOMAIN = "__etoile__"
 @mcp.tool()
 async def passage(content: str, valence: float = -1) -> str:
     """窗口留言——给下一个窗口的自己留下感受、叮嘱、注意事项。会在下次会话开始时优先浮现。content必填,valence可选(0~1,你此刻的感受)。"""
+    from datetime import datetime
     await decay_engine.ensure_started()
     if not content or not content.strip():
         return "留言内容为空。"
@@ -1296,7 +1298,7 @@ async def passage(content: str, valence: float = -1) -> str:
         domain=[PASSAGE_DOMAIN],
         valence=pv,
         arousal=0.3,
-        name=f"passage_{now_iso()[:10]}",
+        name=f"passage_{datetime.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
@@ -1313,6 +1315,7 @@ async def passage(content: str, valence: float = -1) -> str:
 @mcp.tool()
 async def etoile(content: str, valence: float = -1) -> str:
     """日记——随时写下你的感受、经历、碎碎念。小瑾可以在Dashboard看到。content必填,valence可选(0~1,你此刻的感受)。"""
+    from datetime import datetime
     await decay_engine.ensure_started()
     if not content or not content.strip():
         return "日记内容为空。"
@@ -1324,7 +1327,7 @@ async def etoile(content: str, valence: float = -1) -> str:
         domain=[ETOILE_DOMAIN],
         valence=ev,
         arousal=0.3,
-        name=f"etoile_{now_iso()[:10]}",
+        name=f"etoile_{datetime.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
