@@ -566,6 +566,23 @@ async def breath(
             logger.error(f"Failed to list buckets for surfacing / 浮现列桶失败: {e}")
             return "记忆系统暂时无法访问。"
 
+        # --- Latest passage: message from previous window, surface at very top ---
+        # --- 最新 passage：上个窗口留给你的话，浮现在最顶端 ---
+        passages = [
+            b for b in all_buckets
+            if "__passage__" in b["metadata"].get("domain", [])
+        ]
+        passages.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        latest_passage = passages[0] if passages else None
+        passage_result = None
+        if latest_passage:
+            ptext = strip_wikilinks(latest_passage["content"])
+            pdate = latest_passage["metadata"].get("created", "")[:10]
+            passage_result = (
+                f"🪟 [上个窗口给你的留言 · {pdate}] "
+                f"[bucket_id:{latest_passage['id']}]\n{ptext}"
+            )
+
         # --- Pinned/protected buckets: always surface as core principles ---
         # --- 钉选桶：作为核心准则，始终浮现 ---
         pinned_buckets = [
@@ -623,6 +640,8 @@ async def breath(
         # --- 按 token 预算浮现，带多样性 + 硬上限 ---
         # Top-1 always surfaces; rest sampled from top-20 for diversity
         token_budget = max_tokens
+        if passage_result:
+            token_budget -= count_tokens_approx(passage_result)
         for r in pinned_results:
             token_budget -= count_tokens_approx(r)
 
@@ -658,10 +677,12 @@ async def breath(
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
 
-        if not pinned_results and not dynamic_results:
+        if not passage_result and not pinned_results and not dynamic_results:
             return "权重池平静，没有需要处理的记忆。"
 
         parts = []
+        if passage_result:
+            parts.append("=== 上个窗口的留言 ===\n" + passage_result)
         if pinned_results:
             parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
         if dynamic_results:
