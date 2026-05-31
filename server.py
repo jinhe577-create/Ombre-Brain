@@ -1286,6 +1286,7 @@ ETOILE_DOMAIN = "__etoile__"
 @mcp.tool()
 async def passage(content: str, valence: float = -1) -> str:
     """窗口留言——给下一个窗口的自己留下感受、叮嘱、注意事项。会在下次会话开始时优先浮现。content必填,valence可选(0~1,你此刻的感受)。"""
+    from datetime import datetime
     await decay_engine.ensure_started()
     if not content or not content.strip():
         return "留言内容为空。"
@@ -1297,7 +1298,7 @@ async def passage(content: str, valence: float = -1) -> str:
         domain=[PASSAGE_DOMAIN],
         valence=pv,
         arousal=0.3,
-        name=f"passage_{_dt.now().strftime('%Y-%m-%d')}",
+        name=f"passage_{datetime.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
@@ -1314,6 +1315,7 @@ async def passage(content: str, valence: float = -1) -> str:
 @mcp.tool()
 async def etoile(content: str, valence: float = -1) -> str:
     """日记——随时写下你的感受、经历、碎碎念。小瑾可以在Dashboard看到。content必填,valence可选(0~1,你此刻的感受)。"""
+    from datetime import datetime
     await decay_engine.ensure_started()
     if not content or not content.strip():
         return "日记内容为空。"
@@ -1325,7 +1327,7 @@ async def etoile(content: str, valence: float = -1) -> str:
         domain=[ETOILE_DOMAIN],
         valence=ev,
         arousal=0.3,
-        name=f"etoile_{_dt.now().strftime('%Y-%m-%d')}",
+        name=f"etoile_{datetime.now().strftime('%Y-%m-%d')}",
         bucket_type="feel",
     )
     try:
