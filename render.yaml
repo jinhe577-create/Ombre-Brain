@@ -3,7 +3,7 @@ services:
     name: ombre-brain
     env: python
     region: oregon
-    plan: free
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python src/server.py
     envVars:
@@ -28,4 +28,4 @@ services:
     disk:
       name: ombre-buckets
       mountPath: /opt/render/project/src/buckets
-      sizeGB: 5              # bge-m3 model ~2.2GB + buckets; free plan only has 1GB, upgrade needed
+      sizeGB: 1              # 云端 embedding API 模式够用；要跑本地 bge-m3 再扩到 5GB
