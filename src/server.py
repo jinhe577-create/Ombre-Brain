@@ -68,6 +68,8 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools import passage as _t_passage
+from tools import etoile as _t_etoile
 from tools._common import (
     check_content_size as _check_content_size,
     check_pinned_quota as _check_pinned_quota,
@@ -782,6 +784,27 @@ async def dream(window_hours: Optional[int] = 48) -> str:
         _t_dream.dispatch(window_hours=window_hours),
         op="dream",
         args={"window_hours": window_hours},
+    )
+
+
+# --- fork 定制工具：passage 窗口留言 / étoile 日记 ---
+@mcp_extra.tool()
+async def passage(content: str, valence: Optional[float] = -1) -> str:
+    """窗口留言——给下一个窗口的自己留下感受、叮嘱、注意事项。会在下次会话开始时优先浮现。content 必填,valence 可选(0~1,你此刻的感受)。"""
+    return await _with_notice(
+        _t_passage.dispatch(content=content, valence=valence),
+        op="passage",
+        args={"content_len": len(content or ""), "valence": valence},
+    )
+
+
+@mcp_extra.tool()
+async def etoile(content: str, valence: Optional[float] = -1) -> str:
+    """日记——随时写下你的感受、经历、碎碎念。用户可以在 Dashboard 看到。content 必填,valence 可选(0~1,你此刻的感受)。"""
+    return await _with_notice(
+        _t_etoile.dispatch(content=content, valence=valence),
+        op="etoile",
+        args={"content_len": len(content or ""), "valence": valence},
     )
 
 

@@ -103,6 +103,23 @@ def register(mcp) -> None:
 
             parts = []
             token_budget = 10000
+
+            # --- fork 定制：最新 passage（上个窗口的留言）最先注入 ---
+            try:
+                passages = [
+                    b for b in all_buckets
+                    if "__passage__" in (b["metadata"].get("domain") or [])
+                ]
+                if passages:
+                    passages.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+                    lp = passages[0]
+                    ptext = strip_wikilinks(lp["content"])
+                    pdate = str(lp["metadata"].get("created", ""))[:10]
+                    parts.append(f"🪟 [上个窗口给你的留言 · {pdate}]\n{ptext}")
+                    token_budget -= count_tokens_approx(ptext)
+            except Exception as e:
+                logger.warning(f"breath_hook passage section failed: {e}")
+
             for b in pinned:
                 summary = await sh.dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
                 parts.append(f"📌 [核心准则] {summary}")

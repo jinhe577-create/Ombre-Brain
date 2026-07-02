@@ -57,6 +57,24 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}
 
+    # --- fork 定制：最新 passage（上个窗口的留言）永远置顶 ---
+    # passage 是 type="feel" + domain=["__passage__"]，会被下方 unresolved
+    # 的 feel 过滤挡掉，所以单独提取。只取最新一条，原文展示不脱水。
+    passage_result = None
+    passages = [
+        b for b in all_buckets
+        if "__passage__" in (b["metadata"].get("domain") or [])
+    ]
+    if passages:
+        passages.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+        latest = passages[0]
+        ptext = strip_wikilinks(latest["content"])
+        pdate = str(latest["metadata"].get("created", ""))[:10]
+        passage_result = (
+            f"🪟 [上个窗口给你的留言 · {pdate}] "
+            f"[bucket_id:{latest['id']}]\n{ptext}"
+        )
+
     # --- pinned/protected 桶置顶（排除 letter 桶：letter 的 importance=10 不代表核心准则）---
     # 注意：pinned 提取在 anchor 过滤 *之前*，保证 anchor+pinned 桶也能出现在核心准则段。
     # pinned 优先级高于 anchor（她/他钉选的原则永远可见）。
@@ -219,17 +237,21 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             rt.mark_op("breath_empty")
         stats = await rt.bucket_mgr.get_stats()
         total = stats.get("permanent_count", 0) + stats.get("dynamic_count", 0)
-        if total == 0:
+        if total == 0 and not passage_result:
             return (
                 "我的记忆池现在是空的。\n"
                 "想给我留点种子？用 hold(content=\"...\") 写下第一条；\n"
                 "或者 grow(content=\"...\") 把一段长对话/日记一次性灌给我。"
             )
-        return (
+        quiet_msg = (
             "权重池暂时平静——我手上没什么需要主动浮现的东西。\n"
             "可以试试 breath(query=\"想找的关键词\") 走检索，\n"
             "或者 dream() 让我自己挑几段最近的记忆嚼一嚼。"
         )
+        # fork 定制：即使权重池平静，上个窗口的留言也要送达
+        if passage_result:
+            return "=== 上个窗口的留言 ===\n" + passage_result + "\n\n" + quiet_msg
+        return quiet_msg
 
     # --- iter 1.6 §7: passive association ---
     passive_results: list[str] = []
@@ -296,6 +318,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             rt.logger.warning(f"Dream surface block failed / 偶遇模块异常: {e}")
 
     parts = []
+    if passage_result:
+        parts.append("=== 上个窗口的留言 ===\n" + passage_result)
     if pinned_results:
         parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
     if dynamic_results:

@@ -30,6 +30,7 @@ from . import embedding
 from . import ollama_local
 from . import config_api
 from . import v3_debug
+from . import passages
 
 
 def register_all(mcp) -> None:
@@ -55,3 +56,5 @@ def register_all(mcp) -> None:
     # 接入层/ombrebrain 包）；在此之前所有请求降级返回 available:False，
     # 不会报错也不会暴露假数据。见 docs/ 待办：v3_debug 同步说明。
     v3_debug.register(mcp)
+    # passages：fork 定制 —— passage 窗口留言 / étoile 日记 / trace 统计
+    passages.register(mcp)
