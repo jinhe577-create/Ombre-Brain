@@ -121,7 +121,7 @@ def register(mcp) -> None:
                 # #4a ③：更新源可配（update.repo / update.ref），默认官方 main。
                 _ucfg = getattr(sh, "config", {}) or {}
                 _ucfg = _ucfg.get("update") or {}
-                _repo = str(_ucfg.get("repo") or "P0luz/Ombre-Brain").strip().strip("/")
+                _repo = str(_ucfg.get("repo") or "jinhe577-create/Ombre-Brain").strip().strip("/")
                 _ref  = str(_ucfg.get("ref")  or "main").strip()
                 _zip_url = f"https://github.com/{_repo}/archive/refs/heads/{_ref}.zip"
                 async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
