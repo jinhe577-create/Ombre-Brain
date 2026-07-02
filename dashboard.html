@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ombre Brain</title>
+<title>Ombre Brain · 小瑾 & 小克</title>
 <meta name="theme-color" content="#B85C3C">
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="apple-touch-icon" href="/static/icon.svg">
@@ -20,34 +20,40 @@
   }
 
   :root {
-    /* === 复古掌机 retro-handheld palette — warm cream plastic + pale LCD + gold === */
-    --bg: #E7E2D8;                    /* 外环境米灰（带颗粒感） */
-    --bg-gradient: #E7E2D8;
-    --surface: #F4F0E8;              /* 凸起塑料外壳 */
-    --surface-solid: #EDE8DE;        /* 次级外壳块 */
-    --border: #DCD6CA;                /* 极柔的分隔（几乎无线条感） */
-    --border-strong: #C7C0B2;
-    --text: #2C2A26;                  /* 墨黑 */
-    --text-dim: #6E695E;
-    --text-light: #9E988C;
-    --accent: #C2982F;                /* 暖金（高亮/激活态） */
-    --accent-light: #D7B14A;
-    --accent-glow: rgba(194, 152, 47, 0.22);
+    /* === fork 定制 mint & cream palette — 薄荷绿 + 奶油（小瑾 & 小克） === */
+    --bg: #EAF6EC;                    /* 薄荷底色 */
+    --bg-gradient: linear-gradient(160deg, #EAF6EC 0%, #DCEEDE 45%, #F5F1E4 100%);
+    --surface: #F4FAF3;              /* 凸起卡片面 */
+    --surface-solid: #E6F1E4;        /* 次级面块 */
+    --border: #CFE5D2;                /* 极柔的分隔 */
+    --border-strong: #B8DCC1;
+    --text: #2C3E2F;                  /* 墨绿黑 */
+    --text-dim: #6B7F6E;
+    --text-light: #9CAF9F;
+    --accent: #5A8B6A;                /* 薄荷绿（高亮/激活态） */
+    --accent-light: #7FAC8C;
+    --accent-glow: rgba(90, 139, 106, 0.22);
     --positive: #87A987;
-    --negative: #BE5A41;              /* 删除/危险红 */
+    --negative: #C0616B;              /* 删除/危险红 */
     --warning: #B89762;
-    /* 拟物化双向光影：高光（左上）+ 阴影（右下）。原作者把高光设成透明=关闭了立体感，这里点亮。 */
-    --shadow-light: rgba(255, 253, 247, 0.9);
-    --shadow-dark: rgba(150, 138, 116, 0.40);
-    --shadow-dark-subtle: rgba(150, 138, 116, 0.22);
-    /* LCD 点阵屏 */
-    --lcd: #C7C9BC;                   /* 屏底（灰绿单色） */
-    --lcd-text: #25271E;              /* 屏上深字 */
-    --lcd-dim: #5B5D4F;
-    --lcd-glow: rgba(37, 39, 30, 0.18);
+    /* 拟物化双向光影：高光（左上）+ 阴影（右下）。 */
+    --shadow-light: rgba(255, 255, 252, 0.9);
+    --shadow-dark: rgba(122, 150, 130, 0.38);
+    --shadow-dark-subtle: rgba(122, 150, 130, 0.20);
+    /* LCD 点阵屏 → 薄荷 LCD */
+    --lcd: #CFE8D4;                   /* 屏底（薄荷单色） */
+    --lcd-text: #1F3326;              /* 屏上深字 */
+    --lcd-dim: #4A6652;
+    --lcd-glow: rgba(31, 51, 38, 0.16);
     --shell-radius: 24px;
     --radius-inner: 16px;
     --radius-control: 12px;
+    /* fork 定制视图用到的补充变量 */
+    --accent-deep: #3D6E50;
+    --mint: #B8DCC1;
+    --mint-soft: #D5EDDB;
+    --cream: #FAF6E9;
+    --surface-card: rgba(255, 255, 255, 0.72);
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -55,7 +61,8 @@
   body {
     font-family: 'Share Tech Mono', 'Noto Sans SC', system-ui, sans-serif;
     font-weight: 400;
-    background: var(--bg);
+    background: var(--bg-gradient);
+    background-attachment: fixed;
     color: var(--text);
     min-height: 100vh;
     line-height: 1.75;
@@ -1724,9 +1731,224 @@
     transition: opacity 0.3s;
   }
   .self-overlay.show { opacity: 1; pointer-events: auto; }
+
+  /* ========== fork 定制：splash 落地页 ========== */
+  .splash {
+    position: fixed;
+    inset: 0;
+    background: var(--bg-gradient);
+    z-index: 999;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 24px;
+    transition: opacity 0.6s ease, visibility 0.6s ease;
+  }
+  .splash.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+  .splash::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 20% 30%, rgba(184, 220, 193, 0.5) 0%, transparent 50%),
+      radial-gradient(circle at 80% 70%, rgba(244, 250, 243, 0.8) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .splash-content { position: relative; text-align: center; max-width: 520px; }
+  .splash-title {
+    font-family: 'Cormorant Garamond', 'Noto Serif SC', serif;
+    font-size: 44px;
+    font-weight: 500;
+    color: var(--accent-deep);
+    margin-bottom: 8px;
+    letter-spacing: 1.5px;
+    font-style: italic;
+  }
+  .splash-subtitle {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+    margin-bottom: 56px;
+    text-transform: uppercase;
+  }
+  .splash-counter {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 11px;
+    letter-spacing: 4px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .splash-days {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 96px;
+    font-weight: 500;
+    color: var(--accent);
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .splash-days-suffix {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 64px;
+  }
+  button.splash-enter, .splash-enter {
+    background: linear-gradient(145deg, var(--accent-light), var(--accent)) !important;
+    color: #FAF6E9 !important;
+    border: none !important;
+    padding: 16px 56px;
+    height: auto;
+    border-radius: 30px !important;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(90, 139, 106, 0.25) !important;
+    transition: all 0.3s ease;
+  }
+  button.splash-enter:hover, .splash-enter:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px rgba(90, 139, 106, 0.35) !important;
+  }
+  .splash-quote {
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-top: 40px;
+    letter-spacing: 0.5px;
+  }
+
+  /* ========== fork 定制：Étoile/Passage/Lueur 条目卡 ========== */
+  .entry-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+    box-shadow: 4px 4px 14px var(--shadow-dark-subtle), -4px -4px 14px var(--shadow-light);
+    transition: all 0.25s ease;
+  }
+  .entry-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 6px 6px 18px var(--shadow-dark), -6px -6px 18px var(--shadow-light);
+  }
+  .entry-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .entry-meta .window-no {
+    background: var(--mint);
+    color: var(--accent-deep);
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+  .entry-meta .v-mini {
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--negative), var(--warning), var(--positive));
+    position: relative;
+  }
+  .entry-meta .v-mini-dot {
+    position: absolute;
+    top: -2px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--cream);
+    border: 1.5px solid var(--accent);
+    transform: translateX(-50%);
+  }
+  .entry-content {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 14px;
+    line-height: 1.9;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .fork-empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-light);
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 16px;
+    letter-spacing: 1px;
+  }
+
+  /* ========== fork 定制：Trace 统计卡 ========== */
+  .trace-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .trace-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 24px 22px;
+    box-shadow: 4px 4px 14px var(--shadow-dark-subtle), -4px -4px 14px var(--shadow-light);
+  }
+  .trace-card .trace-label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .trace-card .trace-value {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 38px;
+    font-weight: 500;
+    color: var(--accent);
+    line-height: 1;
+  }
+  .trace-card .trace-suffix {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
 </style>
 </head>
 <body>
+
+<!-- fork 定制：splash 落地页（auth overlay z-index 9999 > splash 999，登录流程不受影响） -->
+<div class="splash" id="splash">
+  <div class="splash-content">
+    <div class="splash-title">小瑾 &amp; 小克</div>
+    <div class="splash-subtitle">Ombre Brain · Mémoire Partagée</div>
+
+    <div class="splash-counter">We have been together for</div>
+    <div class="splash-days" id="splash-days">—</div>
+    <div class="splash-days-suffix" id="splash-days-suffix">days</div>
+
+    <button class="splash-enter" onclick="enterBase()">Enter Base</button>
+
+    <div class="splash-quote" id="splash-quote">"我向你投降。"</div>
+  </div>
+</div>
 
 <!-- SVG icon sprite — all icons referenced via <use href="#i-*"> -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -1756,6 +1978,7 @@
     Ombre Brain<span class="version-badge" id="version-badge"></span>
   </h1>
   <div class="header-meta">
+    <span id="mini-counter" style="font-family:'Cormorant Garamond',serif;font-size:12px;color:var(--accent-deep);letter-spacing:1px;"></span>
     <span class="stats" id="stats">loading...</span>
     <span id="heartbeat-indicator" title="MCP 心跳" style="font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:4px;">
       <span id="heartbeat-dot" style="width:8px;height:8px;border-radius:50%;background:#bbb;display:inline-block;"></span>
@@ -1777,19 +2000,28 @@
 </div>
 
 <div class="tabs">
-  <div class="tab active" data-tab="list"><span>记忆桶</span><span class="tab-en">Buckets</span></div>
-  <div class="tab" data-tab="breath"><span>Breath 模拟</span><span class="tab-en">Breath Trace</span></div>
-  <div class="tab" data-tab="network"><span>记忆网络</span><span class="tab-en">Network</span></div>
-  <div class="tab" data-tab="tools"><span>工具箱</span><span class="tab-en">Toolbox</span></div>
-  <div class="tab" data-tab="plan"><span>计划</span><span class="tab-en">Plans</span></div>
-  <div class="tab" data-tab="letters"><span>信</span><span class="tab-en">Letters</span></div>
-  <div class="tab" data-tab="anchors"><span>锚点</span><span class="tab-en">Anchors</span></div>
-  <div class="tab" data-tab="import"><span>导入</span><span class="tab-en">Import</span></div>
-  <div class="tab" data-tab="logs"><span>日志</span><span class="tab-en">Logs</span></div>
-  <div class="tab" data-tab="settings"><span>设置</span><span class="tab-en">Settings</span></div>
+  <div class="tab active" data-tab="list"><span>Mémoire</span><span class="tab-en">记忆桶</span></div>
+  <div class="tab" data-tab="etoile"><span>Étoile</span><span class="tab-en">星星日记</span></div>
+  <div class="tab" data-tab="passage"><span>Passage</span><span class="tab-en">窗口留言</span></div>
+  <div class="tab" data-tab="lueur"><span>Lueur</span><span class="tab-en">微光感受</span></div>
+  <div class="tab" data-tab="trace-stats"><span>Trace</span><span class="tab-en">统计</span></div>
+  <div class="tab" data-tab="breath"><span>Souffle</span><span class="tab-en">Breath 模拟</span></div>
+  <div class="tab" data-tab="network"><span>Réseau</span><span class="tab-en">记忆网络</span></div>
+  <div class="tab" data-tab="tools"><span>Atelier</span><span class="tab-en">工具箱</span></div>
+  <div class="tab" data-tab="plan"><span>Projets</span><span class="tab-en">计划</span></div>
+  <div class="tab" data-tab="letters"><span>Lettres</span><span class="tab-en">信</span></div>
+  <div class="tab" data-tab="anchors"><span>Ancres</span><span class="tab-en">锚点</span></div>
+  <div class="tab" data-tab="import"><span>Importer</span><span class="tab-en">导入</span></div>
+  <div class="tab" data-tab="logs"><span>Journal</span><span class="tab-en">日志</span></div>
+  <div class="tab" data-tab="settings"><span>Réglages</span><span class="tab-en">设置</span></div>
+  <!-- v3-debug tab 暂时隐藏：后端 /api/v3/debug/* 路由已就位（只读、不写数据），
+       但 v3_runtime 尚未接入（src/ombrebrain/ 架构核心未挂载到 server.py），
+       现在打开只会看到空列表，不报错但没数据。见 docs/TODO_V3_DEBUG_SYNC.md。
+       v3_runtime 接入后，取消下一行注释即可恢复入口。
   <div class="tab" data-tab="v3-debug"><span>2.4.0 Debug</span><span class="tab-en">Replay</span></div>
+  -->
   <div class="tab-spacer"></div>
-  <div class="tab" data-tab="about"><span>关于</span><span class="tab-en">About</span></div>
+  <div class="tab" data-tab="about"><span>À propos</span><span class="tab-en">关于</span></div>
 </div>
 
 <!-- embed-warn-banner: 向量化未配置时始终可见，配置后自动消失 -->
@@ -2133,6 +2365,62 @@
       <div id="letters-list" style="display:flex;flex-direction:column;gap:14px;margin-top:6px;">
         <div style="text-align:center;color:var(--text-dim);padding:36px 0;font-size:13px;">点击「刷新」加载信件…</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- fork 定制：Étoile 星星日记 -->
+<div class="content" id="etoile-view" style="display:none">
+  <div style="max-width:720px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:32px;">
+      <div style="font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--accent-deep);font-style:italic;letter-spacing:2px;">Étoile</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:11px;color:var(--text-dim);letter-spacing:3px;text-transform:uppercase;margin-top:4px;">小克的星星 · Petits Carnets</div>
+    </div>
+    <div id="etoile-list">
+      <div class="fork-empty-state">chargement…</div>
+    </div>
+  </div>
+</div>
+
+<!-- fork 定制：Passage 窗口留言板 -->
+<div class="content" id="passage-view" style="display:none">
+  <div style="max-width:720px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:32px;">
+      <div style="font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--accent-deep);font-style:italic;letter-spacing:2px;">Passage</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:11px;color:var(--text-dim);letter-spacing:3px;text-transform:uppercase;margin-top:4px;">窗口之间的留言 · Messages entre les fenêtres</div>
+    </div>
+    <div id="passage-list">
+      <div class="fork-empty-state">chargement…</div>
+    </div>
+  </div>
+</div>
+
+<!-- fork 定制：Lueur 微光（纯 feel） -->
+<div class="content" id="lueur-view" style="display:none">
+  <div style="max-width:720px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:32px;">
+      <div style="font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--accent-deep);font-style:italic;letter-spacing:2px;">Lueur</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:11px;color:var(--text-dim);letter-spacing:3px;text-transform:uppercase;margin-top:4px;">微光 · 小克带走的感受</div>
+    </div>
+    <div id="lueur-list">
+      <div class="fork-empty-state">chargement…</div>
+    </div>
+  </div>
+</div>
+
+<!-- fork 定制：Trace 统计 -->
+<div class="content" id="trace-stats-view" style="display:none">
+  <div style="max-width:880px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:36px;">
+      <div style="font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--accent-deep);font-style:italic;letter-spacing:2px;">Trace</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:11px;color:var(--text-dim);letter-spacing:3px;text-transform:uppercase;margin-top:4px;">记忆的痕迹 · Statistiques</div>
+    </div>
+    <div class="trace-grid" id="trace-grid">
+      <div class="fork-empty-state" style="grid-column:1/-1;">chargement…</div>
+    </div>
+    <div class="config-section">
+      <h3 style="font-family:'Cormorant Garamond',serif;letter-spacing:1px;">域分布 · Répartition par domaine</h3>
+      <div id="trace-domain-chart" style="min-height:120px;color:var(--text-dim);font-size:13px;">加载中…</div>
     </div>
   </div>
 </div>
@@ -3809,6 +4097,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
     document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
     document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
+    document.getElementById('etoile-view').style.display = target === 'etoile' ? '' : 'none';
+    document.getElementById('passage-view').style.display = target === 'passage' ? '' : 'none';
+    document.getElementById('lueur-view').style.display = target === 'lueur' ? '' : 'none';
+    document.getElementById('trace-stats-view').style.display = target === 'trace-stats' ? '' : 'none';
     if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
     if (target === 'network') loadNetwork();
     if (target === 'tools') loadToolsPanel();
@@ -3835,6 +4127,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'letters') loadLetters();
     if (target === 'anchors') loadAnchorsView();
     if (target === 'about') loadAbout();
+    if (target === 'etoile') loadEtoiles();
+    if (target === 'passage') loadPassages();
+    if (target === 'lueur') loadLueurs();
+    if (target === 'trace-stats') loadTraceStats();
   });
 });
 
@@ -6809,8 +7105,7 @@ function renderV3DebugDecision(record, index) {
   const allowed = summary.policy_allowed;
   const badgeColor = ok && allowed ? 'var(--positive)' : (allowed ? 'var(--warning)' : 'var(--negative)');
   const surfaces = (summary.projection_surfaces || []).join(', ') || '-';
-  const recordId = esc(record.id || '');
-  return '<button data-decision-id="' + recordId + '" onclick="replayV3Decision(this.dataset.decisionId)" ' +
+  return '<button onclick="replayV3Decision(\'' + esc(record.id) + '\')" ' +
     'style="text-align:left;background:var(--surface-solid);border:1px solid var(--border);border-radius:4px;padding:10px 12px;cursor:pointer;color:var(--text);">' +
     '<div style="display:flex;align-items:center;gap:8px;font-size:12px;">' +
       '<span style="width:7px;height:7px;border-radius:50%;background:' + badgeColor + ';display:inline-block;flex-shrink:0;"></span>' +
@@ -8239,6 +8534,177 @@ function renderSelfEntries() {
     }
   } catch (_) {}
 })();
+</script>
+
+<script>
+// ============================================================
+// fork 定制：splash 落地页 + Étoile/Passage/Lueur/Trace 视图
+// ============================================================
+var ANNIVERSARY = new Date('2026-02-15T00:00:00');
+
+function renderSplashCounter() {
+  var d = Math.floor(daysSince(ANNIVERSARY));
+  document.getElementById('splash-days').textContent = d;
+  document.getElementById('splash-days-suffix').textContent = d === 1 ? 'day' : 'days';
+  var mini = document.getElementById('mini-counter');
+  if (mini) mini.textContent = 'Day ' + d + ' · 小瑾 & 小克';
+}
+function enterBase() {
+  document.getElementById('splash').classList.add('hidden');
+  setTimeout(function() {
+    var s = document.getElementById('splash');
+    if (s) s.style.display = 'none';
+  }, 700);
+}
+renderSplashCounter();
+
+function fmtDateFork(iso) {
+  if (!iso) return '';
+  var s = String(iso);
+  return s.slice(0, 10) + (s.length > 15 ? ' ' + s.slice(11, 16) : '');
+}
+
+async function loadEtoiles() {
+  var list = document.getElementById('etoile-list');
+  try {
+    var res = await fetch(BASE + '/api/etoiles');
+    var data = await res.json();
+    if (!Array.isArray(data) || !data.length) {
+      list.innerHTML = '<div class="fork-empty-state">还没有星星 · Aucune étoile encore</div>';
+      return;
+    }
+    list.innerHTML = data.map(function(e) {
+      var vPos = Math.round((e.valence || 0.5) * 100);
+      return '<div class="entry-card">' +
+        '<div class="entry-meta">' +
+          '<span>✦ ' + fmtDateFork(e.created) + '</span>' +
+          '<span class="v-mini"><span class="v-mini-dot" style="left:' + vPos + '%"></span></span>' +
+        '</div>' +
+        '<div class="entry-content">' + esc(e.content) + '</div>' +
+      '</div>';
+    }).join('');
+  } catch(err) {
+    list.innerHTML = '<div class="fork-empty-state">加载失败: ' + esc(err.message) + '</div>';
+  }
+}
+
+async function loadPassages() {
+  var list = document.getElementById('passage-list');
+  try {
+    var res = await fetch(BASE + '/api/passages');
+    var data = await res.json();
+    if (!Array.isArray(data) || !data.length) {
+      list.innerHTML = '<div class="fork-empty-state">还没有窗口留言 · Aucun passage encore</div>';
+      return;
+    }
+    list.innerHTML = data.map(function(p) {
+      var vPos = Math.round((p.valence || 0.5) * 100);
+      return '<div class="entry-card">' +
+        '<div class="entry-meta">' +
+          '<span class="window-no">Window ' + p.window_no + '</span>' +
+          '<span>🪟 ' + fmtDateFork(p.created) + '</span>' +
+          '<span class="v-mini"><span class="v-mini-dot" style="left:' + vPos + '%"></span></span>' +
+        '</div>' +
+        '<div class="entry-content">' + esc(p.content) + '</div>' +
+      '</div>';
+    }).join('');
+  } catch(err) {
+    list.innerHTML = '<div class="fork-empty-state">加载失败: ' + esc(err.message) + '</div>';
+  }
+}
+
+async function loadLueurs() {
+  var list = document.getElementById('lueur-list');
+  try {
+    if (!allBuckets || !allBuckets.length) await loadBuckets();
+    var feels = allBuckets.filter(function(b) {
+      if (b.type !== 'feel') return false;
+      var doms = b.domain || [];
+      return doms.indexOf('__passage__') === -1 && doms.indexOf('__etoile__') === -1;
+    });
+    if (!feels.length) {
+      list.innerHTML = '<div class="fork-empty-state">还没有微光 · Aucune lueur encore</div>';
+      return;
+    }
+    var rendered = [];
+    for (var i = 0; i < feels.length; i++) {
+      var b = feels[i];
+      var content = b.content_preview || b.name || '';
+      try {
+        var res = await fetch(BASE + '/api/bucket/' + b.id);
+        var det = await res.json();
+        content = det.content || content;
+      } catch (e) { /* 详情失败时退回预览 */ }
+      var vPos = Math.round((b.valence || 0.5) * 100);
+      rendered.push('<div class="entry-card">' +
+        '<div class="entry-meta">' +
+          '<span>🫧 ' + fmtDateFork(b.created) + '</span>' +
+          '<span class="v-mini"><span class="v-mini-dot" style="left:' + vPos + '%"></span></span>' +
+        '</div>' +
+        '<div class="entry-content">' + esc(content) + '</div>' +
+      '</div>');
+    }
+    list.innerHTML = rendered.join('');
+  } catch(err) {
+    list.innerHTML = '<div class="fork-empty-state">加载失败: ' + esc(err.message) + '</div>';
+  }
+}
+
+async function loadTraceStats() {
+  var grid = document.getElementById('trace-grid');
+  var chart = document.getElementById('trace-domain-chart');
+  try {
+    var res = await fetch(BASE + '/api/trace');
+    var t = await res.json();
+    var cards = [
+      { label: 'Mémoires', value: t.total, suffix: '条记忆' },
+      { label: 'Caractères', value: (t.total_chars || 0).toLocaleString(), suffix: '个字' },
+      { label: 'Étoile', value: t.etoiles || 0, suffix: '颗星星' },
+      { label: 'Passage', value: t.passages || 0, suffix: '次留言' },
+      { label: 'Lueur', value: t.feel_pure || 0, suffix: '抹微光' },
+      { label: 'Résolu', value: t.resolved || 0, suffix: '已解决' },
+      { label: 'En cours', value: t.unresolved || 0, suffix: '未解决' },
+      { label: 'Épinglé', value: t.pinned || 0, suffix: '钉选' },
+    ];
+    grid.innerHTML = cards.map(function(c) {
+      return '<div class="trace-card">' +
+        '<div class="trace-label">' + c.label + '</div>' +
+        '<div class="trace-value">' + c.value + '</div>' +
+        '<div class="trace-suffix">' + c.suffix + '</div>' +
+      '</div>';
+    }).join('');
+  } catch(err) {
+    grid.innerHTML = '<div class="fork-empty-state" style="grid-column:1/-1;">加载失败: ' + esc(err.message) + '</div>';
+  }
+  try {
+    var res2 = await fetch(BASE + '/api/domain-stats');
+    var data = await res2.json();
+    if (!data.domains || !data.domains.length) {
+      chart.textContent = '暂无数据';
+      return;
+    }
+    var visible = data.domains.filter(function(d) {
+      return d.name !== '__passage__' && d.name !== '__etoile__';
+    });
+    if (!visible.length) { chart.textContent = '暂无数据'; return; }
+    var maxCount = visible[0].count;
+    chart.innerHTML = visible.map(function(d) {
+      var pct = Math.round(d.count / data.total * 100);
+      var barWidth = Math.max(4, Math.round(d.count / maxCount * 100));
+      var isUncategorized = d.name === '未分类';
+      var barColor = isUncategorized ? 'var(--warning)' : 'var(--accent)';
+      return '<div style="display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px;">' +
+        '<span style="min-width:72px;text-align:right;color:' + (isUncategorized ? 'var(--warning)' : 'var(--text)') + ';font-family:\'Noto Serif SC\',serif;">' + esc(d.name) + '</span>' +
+        '<div style="flex:1;height:18px;background:var(--mint-soft);border-radius:9px;overflow:hidden;">' +
+          '<div style="width:' + barWidth + '%;height:100%;background:' + barColor + ';border-radius:9px;transition:width .3s;"></div>' +
+        '</div>' +
+        '<span style="min-width:60px;font-size:11px;color:var(--text-dim);font-family:\'Cormorant Garamond\',serif;letter-spacing:1px;">' + d.count + ' (' + pct + '%)</span>' +
+      '</div>';
+    }).join('');
+  } catch(err) {
+    chart.textContent = '加载失败';
+  }
+}
 </script>
 
 </body>

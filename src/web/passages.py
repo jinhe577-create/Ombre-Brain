@@ -140,3 +140,36 @@ def register(mcp) -> None:
             })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    @mcp.custom_route("/api/domain-stats", methods=["GET"])
+    async def api_domain_stats(request: Request) -> Response:
+        """Domain distribution statistics for the Trace view chart."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
+            domain_counts: dict[str, int] = {}
+            type_counts: dict[str, int] = {}
+            total_resolved = total_unresolved = 0
+            for b in all_buckets:
+                meta = b.get("metadata", {})
+                btype = meta.get("type", "dynamic")
+                type_counts[btype] = type_counts.get(btype, 0) + 1
+                for d in (meta.get("domain") or ["未分类"]):
+                    domain_counts[d] = domain_counts.get(d, 0) + 1
+                if meta.get("resolved"):
+                    total_resolved += 1
+                else:
+                    total_unresolved += 1
+            sorted_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)
+            return JSONResponse({
+                "domains": [{"name": d, "count": c} for d, c in sorted_domains],
+                "types": type_counts,
+                "resolved": total_resolved,
+                "unresolved": total_unresolved,
+                "total": len(all_buckets),
+            })
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
