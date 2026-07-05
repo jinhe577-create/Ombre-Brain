@@ -122,9 +122,14 @@ restart_github_auto_task = None # def(interval_minutes: int) -> None（起停后
 
 
 # --- 项目 .env 读写（config / env-config / host-vault 路由共用，故放共享层）---
-# 与原 server.py 行为一致：.env 落在 src/.env。本文件在 src/web/ 下，上两级即 src/。
+# fork 定制：路径解析统一走 utils.env_file_path（数据目录优先）。Render / Zeabur
+# 上仓库目录随部署重建，.env 落在持久盘（buckets 所在目录）才能活过重启。
 def _project_env_path() -> str:
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    try:
+        from utils import env_file_path  # type: ignore
+    except ImportError:  # pragma: no cover
+        from ..utils import env_file_path  # type: ignore
+    return env_file_path()
 
 
 def _read_env_var(name: str) -> str:

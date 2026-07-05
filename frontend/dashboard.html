@@ -6231,6 +6231,8 @@ async function loadConfig() {
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
+    // fork 定制：根据已保存的 base_url 反推服务商预设，刷新后下拉框不再回到「请选择」
+    if (typeof syncPresetDropdowns === 'function') syncPresetDropdowns();
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + cfg.transport + '</strong><br>数据目录: <strong>' + cfg.buckets_dir + '</strong>'
       + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
@@ -8562,6 +8564,28 @@ function fmtDateFork(iso) {
   if (!iso) return '';
   var s = String(iso);
   return s.slice(0, 10) + (s.length > 15 ? ' ' + s.slice(11, 16) : '');
+}
+
+// 根据已保存的 base_url 反推服务商预设选项：配置持久化后，刷新页面
+// 下拉框自动回到你实际在用的服务商，不用每次手动重选。
+// 匹配规则：base_url 精确匹配预设表；都不匹配但 base_url 非空 → custom。
+function syncPresetDropdowns() {
+  function pick(presets, baseUrl, selectId) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return;
+    var url = (baseUrl || '').trim().replace(/\/+$/, '');
+    if (!url) return;  // 没配置就不动下拉框
+    var hit = '';
+    for (var k in presets) {
+      var p = presets[k].base_url ? presets[k].base_url.replace(/\/+$/, '') : '';
+      if (p && p === url) { hit = k; break; }
+    }
+    sel.value = hit || 'custom';
+  }
+  var dehyUrl = (document.getElementById('cfg-dehy-url') || {}).value;
+  var embUrl = (document.getElementById('cfg-emb-base-url') || {}).value;
+  pick(DEHY_PRESETS, dehyUrl, 'dehy-preset');
+  pick(EMBED_PRESETS, embUrl, 'emb-preset');
 }
 
 async function loadEtoiles() {

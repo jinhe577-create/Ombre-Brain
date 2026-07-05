@@ -75,10 +75,17 @@ from tools._common import (
     check_pinned_quota as _check_pinned_quota,
 )
 
+# --- fork 定制：先把面板持久化的 .env 载入进程 env（平台注入的 env 优先，不覆盖）---
+# 必须在 load_config() 之前：load_config 的 env 覆盖逻辑要能看到这些值。
+from utils import load_env_file_into_environ as _load_env_file, env_file_path as _env_file_path
+_panel_env_loaded = _load_env_file()
+
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
 setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
+if _panel_env_loaded:
+    logger.info(f"[env] 已从 {_env_file_path()} 载入面板持久化变量: {', '.join(_panel_env_loaded)}")
 
 # --- Project version (read from <repo_root>/VERSION) / 项目版本号 ---
 # get_version() 汇总读文件 + fallback 逻辑。

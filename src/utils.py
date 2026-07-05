@@ -76,14 +76,31 @@ def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _persistent_data_dir() -> str:
+    """环境变量指定的数据目录（OMBRE_VAULT_DIR / OMBRE_BUCKETS_DIR，目录存在才算）。
+
+    fork 定制：Render / Zeabur 这类平台上，仓库目录随每次部署重建，唯一
+    可持久化的位置是挂载的数据盘（= buckets 目录所在盘）。config.yaml 和
+    .env 落在这里，Dashboard 面板保存的服务商 / key / 模型才能活过重启。
+    只认环境变量、不读 config.yaml 里的 buckets_dir——否则和 config_file_path
+    形成鸡生蛋循环。"""
+    for var in ("OMBRE_VAULT_DIR", "OMBRE_BUCKETS_DIR"):
+        d = os.environ.get(var, "").strip()
+        if d and os.path.isdir(d):
+            return d
+    return ""
+
+
 def config_file_path() -> str:
     """config.yaml 的绝对路径 —— 读 / 写 / entrypoint 三方共用的单一真相。
 
     顺序：
       1. $OMBRE_CONFIG_PATH —— 显式指定即采纳，**即便文件尚不存在**
          （entrypoint 会在服务启动前据此创建；Dashboard 写配置时也据此落盘）。
-      2. <cwd>/config.yaml —— 存在才用。
-      3. <project_root>/config.yaml —— 兜底默认。
+      2. <数据目录>/config.yaml —— 存在才用（fork 定制：Render 持久盘）。
+      3. <cwd>/config.yaml —— 存在才用。
+      4. <project_root>/config.yaml —— 存在才用。
+      5. 都不存在（首次写入）：有持久数据目录就落在那里，否则项目根目录。
 
     为什么独立成函数：load_config 读、Dashboard（config_api/buckets/github/
     embedding）写、entrypoint 初始化——以前各处都硬编码 <repo_root>/config.yaml。
@@ -93,10 +110,60 @@ def config_file_path() -> str:
     env_cfg = os.environ.get("OMBRE_CONFIG_PATH", "").strip()
     if env_cfg:
         return env_cfg
+    data_dir = _persistent_data_dir()
+    data_cfg = os.path.join(data_dir, "config.yaml") if data_dir else ""
+    if data_cfg and os.path.exists(data_cfg):
+        return data_cfg
     cwd_cfg = os.path.join(os.getcwd(), "config.yaml")
     if os.path.exists(cwd_cfg):
         return cwd_cfg
-    return os.path.join(_project_root(), "config.yaml")
+    root_cfg = os.path.join(_project_root(), "config.yaml")
+    if os.path.exists(root_cfg):
+        return root_cfg
+    return data_cfg or root_cfg
+
+
+def env_file_path() -> str:
+    """面板持久化 .env 的绝对路径（web/_shared 读写、server 启动加载共用）。
+
+    与 config_file_path 同一哲学：优先数据目录（持久盘），
+    已有仓库根目录 .env 的旧安装保持原路径不动。"""
+    data_dir = _persistent_data_dir()
+    data_env = os.path.join(data_dir, ".env") if data_dir else ""
+    if data_env and os.path.exists(data_env):
+        return data_env
+    root_env = os.path.join(_project_root(), ".env")
+    if os.path.exists(root_env):
+        return root_env
+    return data_env or root_env
+
+
+def load_env_file_into_environ() -> list:
+    """启动时把 env 文件载入 os.environ，返回实际生效的变量名列表。
+
+    平台注入的进程环境变量优先（不覆盖）——与 Dashboard「平台 env 接管」
+    告警逻辑一致：平台 env > 面板持久化 > config.yaml > 默认值。
+    没有这步，纯 env 字段（AI_NAME / OMBRE_HOOK_URL 等）面板改完
+    只活到进程退出。"""
+    path = env_file_path()
+    loaded: list = []
+    if not path or not os.path.exists(path):
+        return loaded
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+                    loaded.append(k)
+    except Exception:
+        pass
+    return loaded
 
 
 def load_config(config_path: Optional[str] = None) -> dict:
