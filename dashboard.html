@@ -848,7 +848,9 @@
     transition: transform .12s ease, box-shadow .15s ease, color .15s ease;
   }
   .tab .tab-en { font-family:'Share Tech Mono',monospace; font-style: normal; letter-spacing: 0.5px; }
-  .tab > span:first-child { font-family: 'RRPL', 'Noto Sans SC', sans-serif; font-weight: 700; letter-spacing: 0.3px; }
+  /* fork 定制：tab 主标签是法语（拉丁字母），不能用 RRPL——那个中文点阵字体的
+     ASCII 字形是零宽的，"Mémoire" 会只剩 é。改用衬线栈，与 splash 同一气质。 */
+  .tab > span:first-child { font-family: 'Cormorant Garamond', 'Noto Serif SC', Georgia, serif; font-weight: 600; font-size: 14px; letter-spacing: 0.6px; }
   .tab:hover { transform: translateY(-1.5px); }
   .tab.active {
     color: var(--accent);
@@ -1588,7 +1590,7 @@
     position: fixed;
     right: 0;
     top: 0;
-    width: 460px;
+    width: min(460px, 100vw);
     height: 100vh;
     background: var(--surface-solid);
     z-index: 300;
@@ -1929,6 +1931,35 @@
     font-size: 12px;
     color: var(--text-dim);
     margin-top: 6px;
+  }
+
+  /* ========== fork 定制：手机端排版修正 ========== */
+  /* 设置页环境变量表：长 URL / 路径值强制换行，表格不得撑破容器 */
+  #env-vars-list table { table-layout: fixed; width: 100%; }
+  #env-vars-list td, #env-vars-list code, #env-vars-list span {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 768px) {
+    /* I（自我认知）侧滑面板：不得比屏幕宽 */
+    .self-panel { width: 100vw; }
+    /* 设置页各卡片里的长 monospace 内容（MCP URL、路径等）一律可换行 */
+    #settings-view code, #settings-view .config-section {
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+    /* 表单行（label + 输入/下拉）：窄屏允许换行，控件不得超出容器 */
+    #settings-view .form-row { flex-wrap: wrap; }
+    #settings-view select, #settings-view input[type="text"], #settings-view input[type="password"], #settings-view input[type="number"] {
+      max-width: 100%;
+      min-width: 0;
+    }
+    /* 兜底：单个元素溢出时不把整页撑出横向滚动 */
+    body { overflow-x: hidden; }
+    /* fork 视图在窄屏下收紧留白 */
+    .entry-card { padding: 18px 16px; }
+    .trace-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .splash-days { font-size: 72px; }
   }
 </style>
 </head>
