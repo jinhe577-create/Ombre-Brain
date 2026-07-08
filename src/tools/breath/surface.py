@@ -66,7 +66,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         if "__passage__" in (b["metadata"].get("domain") or [])
     ]
     if passages:
-        passages.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+        passages.sort(key=lambda b: (str(b["metadata"].get("created", "")), str(b["id"])), reverse=True)
         latest = passages[0]
         ptext = strip_wikilinks(latest["content"])
         pdate = str(latest["metadata"].get("created", ""))[:10]

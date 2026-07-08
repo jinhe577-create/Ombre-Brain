@@ -111,7 +111,7 @@ def register(mcp) -> None:
                     if "__passage__" in (b["metadata"].get("domain") or [])
                 ]
                 if passages:
-                    passages.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+                    passages.sort(key=lambda b: (str(b["metadata"].get("created", "")), str(b["id"])), reverse=True)
                     lp = passages[0]
                     ptext = strip_wikilinks(lp["content"])
                     pdate = str(lp["metadata"].get("created", ""))[:10]

@@ -41,7 +41,7 @@ def register(mcp) -> None:
                 b for b in all_buckets
                 if PASSAGE_DOMAIN in b.get("metadata", {}).get("domain", [])
             ]
-            passages.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+            passages.sort(key=lambda b: (str(b["metadata"].get("created", "")), str(b["id"])), reverse=True)
             result = []
             for idx, b in enumerate(passages):
                 meta = b["metadata"]
@@ -69,7 +69,7 @@ def register(mcp) -> None:
                 b for b in all_buckets
                 if ETOILE_DOMAIN in b.get("metadata", {}).get("domain", [])
             ]
-            etoiles.sort(key=lambda b: str(b["metadata"].get("created", "")), reverse=True)
+            etoiles.sort(key=lambda b: (str(b["metadata"].get("created", "")), str(b["id"])), reverse=True)
             result = [
                 {
                     "id": b["id"],
