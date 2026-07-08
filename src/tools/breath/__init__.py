@@ -4,8 +4,9 @@ tools/breath/__init__.py — breath 工具的总入口与分支调度
 ========================================
 
 breath 是「我睁眼看看自己记得什么」。这个文件根据参数把请求路由到
-四个分支文件之一：
+五个分支文件之一：
 
+- catalog.py：catalog=True → 目录模式（每桶一行元数据，0 LLM，最省 token）
 - feel.py：domain="feel"（或 tags 含 feel/__feel__）→ 拉所有 feel 桶
 - importance.py：importance_min >= 1 → 跳过语义，按 importance 拉前 20
 - surface.py：query 为空 → 浮现模式（pinned + 加权采样未解决桶 + passive）
@@ -21,13 +22,14 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 - 不做权限校验，MCP 调用方默认是模型自身
 
 对外暴露：dispatch(query, max_tokens, domain, valence, arousal, max_results,
-                   importance_min, tags) → str
+                   importance_min, tags, catalog) → str
 ========================================
 """
 
 from typing import Optional
 
 from .. import _runtime as rt
+from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
 from .surface import surface_default
@@ -43,6 +45,7 @@ async def dispatch(
     max_results: Optional[int] = 0,
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
+    catalog: Optional[bool] = False,
 ) -> str:
     # --- Null-safe coercion ---
     if query is None: query = ""
@@ -53,10 +56,29 @@ async def dispatch(
     if max_results is None: max_results = 0
     if importance_min is None: importance_min = -1
     if tags is None: tags = ""
+    if catalog is None: catalog = False
 
     if rt.mark_op:
         rt.mark_op("breath")
+    rt.record_v3_tool_event("breath", {
+        "query": query,
+        "max_tokens": max_tokens,
+        "domain": domain,
+        "valence": valence,
+        "arousal": arousal,
+        "max_results": max_results,
+        "importance_min": importance_min,
+        "tags": tags,
+        "catalog": catalog,
+    })
     await rt.decay_engine.ensure_started()
+
+    # --- catalog 目录模式：最先短路，0 LLM、只读元数据、每桶一行 ---
+    # 开新窗省 token 的推荐姿势：先 breath(catalog=True) 看目录，
+    # 再 breath(query=...) 精准拉取正文。
+    if catalog:
+        domain_filter = [d.strip() for d in domain.split(",") if d.strip()]
+        return await surface_catalog(domain_filter=domain_filter or None)
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}
     default_results = int(surfacing_cfg.get("breath_max_results") or 20)
