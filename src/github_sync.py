@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +30,7 @@ _API = "https://api.github.com"
 _TIMEOUT = 60.0
 _MAX_FILE_BYTES = 5 * 1024 * 1024  # GitHub single blob 上限 ~100MB，这里保守限 5MB
 _TREE_CHUNK = 200                  # 每个 /git/trees 请求最多内联多少文件，避免单请求过大
+_MANIFEST_FILENAME = "_ombre_backup_manifest.json"
 
 
 class GitHubSync:
@@ -55,6 +59,9 @@ class GitHubSync:
         self.last_error: str = ""
         self.last_count: int = 0
         self.is_validated: bool = False   # validate() 成功后置 True
+        # A3：连续失败计数。自动备份可能连挂几次而用户毫无察觉（以为有备份其实没有）。
+        # 每次成功归零、每次失败 +1，供诊断面板判断要不要升级为醒目告警。
+        self.consecutive_failures: int = 0
 
     # --------------------------------------------------------
     # 公开接口
@@ -76,11 +83,13 @@ class GitHubSync:
             self.last_status = "ok"
             self.last_error = ""
             self.last_count = count
+            self.consecutive_failures = 0
             return {"ok": True, "uploaded": count}
         except Exception as e:
             self.last_status = "error"
             self.last_error = str(e)
-            logger.error(f"[github_sync] sync failed: {e}")
+            self.consecutive_failures += 1
+            logger.error(f"[github_sync] sync failed (连续 {self.consecutive_failures} 次): {e}")
             return {"ok": False, "error": str(e)}
 
     async def import_from_github(self, buckets_dir: str) -> dict[str, Any]:
@@ -115,6 +124,15 @@ class GitHubSync:
                 truncated = bool(tj.get("truncated"))
 
                 prefix = (self.path_prefix + "/") if self.path_prefix else ""
+                manifest_path = f"{prefix}{_MANIFEST_FILENAME}"
+                manifest_item = next(
+                    (
+                        t for t in tree
+                        if t.get("type") == "blob" and t.get("path") == manifest_path
+                    ),
+                    None,
+                )
+                backup_manifest = await self._read_backup_manifest_summary(c, manifest_item) if manifest_item else {"present": False}
                 targets = [
                     t for t in tree
                     if t.get("type") == "blob" and t.get("path", "").startswith(prefix)
@@ -122,7 +140,8 @@ class GitHubSync:
                 ]
                 if not targets:
                     return {"ok": True, "imported": 0, "skipped": 0,
-                            "message": f"GitHub 仓库 {self.repo} 的 {prefix or '/'} 下没有 .md 记忆文件"}
+                            "message": f"GitHub 仓库 {self.repo} 的 {prefix or '/'} 下没有 .md 记忆文件",
+                            "backup_manifest": backup_manifest}
 
                 base = os.path.abspath(buckets_dir)
                 imported = 0
@@ -147,8 +166,21 @@ class GitHubSync:
                         else:
                             data = (bj.get("content", "") or "").encode("utf-8")
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with open(dest, "wb") as f:
-                            f.write(data)
+                        # 原子写：导入是覆盖本地记忆的操作，写到一半被中断绝不能留半截文件。
+                        _tmp = f"{dest}.{uuid.uuid4().hex}.tmp"
+                        try:
+                            with open(_tmp, "wb") as f:
+                                f.write(data)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.replace(_tmp, dest)
+                        except Exception:
+                            if os.path.exists(_tmp):
+                                try:
+                                    os.remove(_tmp)
+                                except OSError:
+                                    pass
+                            raise
                         imported += 1
                     except Exception as e:
                         skipped += 1
@@ -163,6 +195,7 @@ class GitHubSync:
                     "total": len(targets),
                     "truncated": truncated,
                     "errors": errors[:10],
+                    "backup_manifest": backup_manifest,
                 }
         except Exception as e:
             logger.error(f"[github_sync] import failed: {e}")
@@ -212,6 +245,7 @@ class GitHubSync:
             "last_error": self.last_error,
             "last_count": self.last_count,
             "is_validated": self.is_validated,
+            "consecutive_failures": self.consecutive_failures,
         }
 
     # --------------------------------------------------------
@@ -238,6 +272,30 @@ class GitHubSync:
                 except OSError as e:
                     logger.warning(f"[github_sync] skip {fn}: {e}")
         return result
+
+    def _build_backup_manifest(self, files: dict[str, bytes]) -> dict[str, Any]:
+        """Build a JSON-safe manifest for the markdown files in one sync."""
+        entries = []
+        total_bytes = 0
+        for rel_path, content in sorted(files.items()):
+            size = len(content)
+            total_bytes += size
+            entries.append({
+                "path": rel_path,
+                "bytes": size,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            })
+        return {
+            "schema_version": 1,
+            "source": "ombre-brain",
+            "generated_at": _now_iso(),
+            "repo": self.repo,
+            "branch": self.branch,
+            "path_prefix": self.path_prefix,
+            "file_count": len(entries),
+            "total_bytes": total_bytes,
+            "files": entries,
+        }
 
     async def _batch_commit(self, files: dict[str, bytes]) -> int:
         """用 Git Trees API 一次性提交所有文件，返回上传文件数。
@@ -284,6 +342,15 @@ class GitHubSync:
                     entry = {"path": gh_path, "mode": "100644", "type": "blob", "sha": rb.json()["sha"]}
                 entries.append(entry)
 
+            manifest_path = f"{self.path_prefix}/{_MANIFEST_FILENAME}" if self.path_prefix else _MANIFEST_FILENAME
+            manifest = self._build_backup_manifest(files)
+            entries.append({
+                "path": manifest_path,
+                "mode": "100644",
+                "type": "blob",
+                "content": json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            })
+
             # 4. 分块创建 tree，块间用 base_tree 串联
             cur_base = base_tree_sha
             for i in range(0, len(entries), _TREE_CHUNK):
@@ -326,6 +393,33 @@ class GitHubSync:
             r.raise_for_status()
 
         return len(files)
+
+    async def _read_backup_manifest_summary(
+        self,
+        client: httpx.AsyncClient,
+        manifest_item: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            sha = manifest_item.get("sha", "")
+            if not sha:
+                return {"present": False}
+            rb = await self._request(client, "GET", f"{_API}/repos/{self.repo}/git/blobs/{sha}")
+            rb.raise_for_status()
+            bj = rb.json()
+            if bj.get("encoding") == "base64":
+                raw = base64.b64decode(bj.get("content", "")).decode("utf-8", errors="replace")
+            else:
+                raw = str(bj.get("content", "") or "")
+            data = json.loads(raw)
+            return {
+                "present": True,
+                "schema_version": data.get("schema_version"),
+                "generated_at": data.get("generated_at", ""),
+                "file_count": int(data.get("file_count") or 0),
+                "total_bytes": int(data.get("total_bytes") or 0),
+            }
+        except Exception as e:
+            return {"present": False, "error": str(e)[:200]}
 
     async def _request(
         self,

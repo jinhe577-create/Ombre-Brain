@@ -2,6 +2,114 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.4.13
+
+### 修复 / Fixed
+
+- 修复向量 API 被反复重复调用的问题：`trace(content=...)` / `plan()` / `letter_write()` 在
+  `bucket_mgr.update()` / `create()` 已经内部同步生成并存好向量之后，又各自显式调用了一次
+  `embedding_engine.generate_and_store()`，导致每次写操作都对同一段内容打两次向量 API。
+  现在移除了这些多余的显式调用。
+- `EmbeddingEngine` 新增进程内小容量 LRU 查询缓存：`breath(query=...)` 内部会对同一个查询串
+  各自调用一次向量检索（`bucket_mgr.search()` 内部一次、`surface_search()` 直接又一次），
+  `hold()`/`grow()` 的 `merge_or_create` → `check_duplicate_for` → `check_plan_resolution`
+  三条 fire-and-forget 链路也会对同一段新内容各嵌入一次。同一段文本对同一模型的向量结果恒定，
+  缓存后这些短时间内的重复请求不再重新打向量 API。
+
+### 测试 / Tests
+
+- 现有 `tests/test_embedding_api_regression.py` 等回归测试全部通过，确认门面缓存不影响
+  既有向量化行为。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.13。
+
+## 2.4.12
+
+### 优化 / Improved
+
+- `pulse()` 顶部统计现在单独显示 feel / plan / letter 数量，避免列表数量和头部统计看起来对不上。
+- `grow()` 短内容走 hold 风格单条保存时会明确提示“没有拆分”，减少短日记归档时的误解。
+- Dashboard 保存 `OMBRE_HOST_VAULT_DIR` 后直接提示需要重启容器/服务；API 也返回 `restart_required` 和 `message`。
+- Dashboard 将单桶、信件和导入审核删除文案改为“删除到档案”，与清理模式里的物理永久删除明确区分。
+- `trace(resolved=1)` 与 REST resolve 共用同一套中文提示，Dashboard 会展示“已沉底/已重新激活”的一致说明。
+- `config.example.yaml` 移除已废弃的 active `wikilink:` 配置段，只保留 deprecated 说明。
+
+### 测试 / Tests
+
+- 新增 `tests/test_priority4_confusion_cleanup.py` 覆盖上述高频困惑点的回归。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.12。
+
+## 2.4.11
+
+### 修复 / Fixed
+
+- MCP OAuth 支持 `refresh_token` grant：授权码换 token 时会同时返回 refresh token，headless 服务器环境下 access token 失效后可直接刷新，不再必须重新打开浏览器授权页。
+- OAuth discovery 与动态客户端注册现在声明 `refresh_token`，并兼容旧版 `.dashboard_mcp_tokens.json` access token 存储格式。
+- 修复 v3 legacy 桥接层缺失的 runtime/web/bucket side-channel API，恢复工具调用、Web 路由注册、更新策略评估和 bucket 生命周期事件的只读旁路记录。
+
+### 测试 / Tests
+
+- 新增 `tests/test_oauth_refresh_token.py` 覆盖 refresh token 元数据声明、授权码换 refresh token、刷新 access token、未知 refresh token 拒绝。
+- 修复并恢复 `tests/test_v3_legacy_*` 桥接回归，测试用例显式注入 fake embedding，避免绕开当前“写入必须有向量化”的生产约束。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.11。
+
+## 2.4.10
+
+### 新增 / Added
+
+- GitHub 同步现在会在同一次 commit 中写入 `_ombre_backup_manifest.json`，记录备份生成时间、文件数、总字节数、每个 bucket markdown 的大小和 sha256。
+- 从 GitHub 导入/恢复时会读取 manifest 摘要并返回给调用方，后续可用于恢复前校验和备份选择。
+
+### 测试 / Tests
+
+- 新增 `tests/test_github_backup_manifest.py` 覆盖 manifest 生成、同步写入和恢复读回。
+- 更新 zero-commit 空仓库同步测试，确认首次提交也包含 manifest。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.10。
+
+## 2.4.9
+
+### 新增 / Added
+
+- Dashboard 历史对话导入新增上传前预检：选中文件后先显示识别格式、轮次、分块数、预计 API 调用、文件大小、首个分块预览和警告，再由用户确认开始导入。
+- 新增 `POST /api/import/preflight`，复用导入解析/分块逻辑做只读预检，不写 bucket、不启动后台任务。
+- 新增 `preview_import()` 纯函数，便于后续把导入体验继续拆成更明确的预检查项。
+
+### 测试 / Tests
+
+- 新增 `tests/test_import_preflight.py` 覆盖导入预检纯函数和 API 路由。
+- 新增 `tests/test_dashboard_import_preflight.py` 覆盖 Dashboard 预检入口。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.9。
+
+## 2.4.8
+
+### 新增 / Added
+
+- Dashboard 设置页新增“系统体检”面板，可一键查看数据目录、记忆桶统计、脱水/打标 LLM、向量化、GitHub 备份、访问控制和运行时状态。
+- 新增 `GET /api/system/diagnostics` 只读接口，返回结构化 `ok` / `warning` / `error` 检查项；体检不主动请求外部 API，避免设置页被慢网络卡住。
+
+### 测试 / Tests
+
+- 新增 `tests/test_system_diagnostics.py` 覆盖诊断接口和缺配置告警。
+- 新增 `tests/test_dashboard_diagnostics_panel.py` 覆盖 Dashboard 体检入口。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.4.8。
+
 ## 2.4.7
 
 ### 修复 / Fixed

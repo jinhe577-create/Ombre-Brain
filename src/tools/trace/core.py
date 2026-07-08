@@ -26,6 +26,7 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
 
 from typing import Optional
 
+from memory_messages import resolved_hint
 from .. import _runtime as rt
 from .._common import check_content_size, check_pinned_quota
 
@@ -65,6 +66,24 @@ async def trace_core(
     if why_remembered is None: why_remembered = ""
     if rt.mark_op:
         rt.mark_op("trace")
+    rt.record_v3_tool_event("trace", {
+        "bucket_id": bucket_id,
+        "name": name,
+        "domain": domain,
+        "valence": valence,
+        "arousal": arousal,
+        "importance": importance,
+        "tags": tags,
+        "resolved": resolved,
+        "pinned": pinned,
+        "digested": digested,
+        "content_length": len(content or ""),
+        "delete": delete,
+        "status": status,
+        "weight": weight,
+        "dont_surface": dont_surface,
+        "why_remembered_length": len(why_remembered or ""),
+    })
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -150,11 +169,9 @@ async def trace_core(
     if not success:
         return f"修改失败: {bucket_id}"
 
-    if "content" in updates:
-        try:
-            await rt.embedding_engine.generate_and_store(bucket_id, updates["content"])
-        except Exception:
-            pass
+    # 注意：bucket_mgr.update() 在 "content" in kwargs 时已经内部调用
+    # _sync_embedding() 重新生成并写入向量（见 bucket_manager.py），这里不需要
+    # 也不应该重复调用 generate_and_store，否则同一条内容会多打一次向量 API。
 
     # --- plan 桶人工/AI 显式 resolve → 联动 related_bucket / resolved_by ---
     # rule.md §1：plan 是承诺，承诺被显式放下，承载它的事件桶也不该再浮上来。
@@ -176,10 +193,7 @@ async def trace_core(
     if "content" in updates:
         changed += (", content=已替换" if changed else "content=已替换")
     if "resolved" in updates:
-        if updates["resolved"]:
-            changed += " → 已沉底，只在关键词触发时重新浮现"
-        else:
-            changed += " → 已重新激活，将参与浮现排序"
+        changed += f" → {resolved_hint(bool(updates['resolved']))}"
     if "digested" in updates:
         if updates["digested"]:
             changed += " → 已隐藏，保留但不再浮现"
