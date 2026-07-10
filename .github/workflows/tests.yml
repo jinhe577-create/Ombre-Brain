@@ -28,7 +28,9 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Run local tests (no API key needed)
-        run: python -m pytest tests/test_scoring.py tests/test_feel_flow.py -v --asyncio-mode=auto
+        # fork 定制：跑全量测试（LLM 相关用例无 key 自动跳过），
+        # 覆盖 passage/etoile/持久化/更新源等 fork 回归，防止合并上游时误删文件
+        run: python -m pytest tests/ -v --asyncio-mode=auto
 
       - name: Run LLM quality tests
         if: env.OMBRE_COMPRESS_API_KEY != ''

@@ -20,6 +20,9 @@ on:
 
 jobs:
   build-and-push:
+    # fork 定制：镜像发布是上游作者的活（需要 p0luz 的 Docker Hub 密钥），
+    # fork 里没有 secrets 每次必失败、白发报错邮件。只在官方仓库运行。
+    if: github.repository == 'P0luz/Ombre-Brain'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
