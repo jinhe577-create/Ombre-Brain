@@ -104,7 +104,8 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         title_en="Embedding API call failed",
         suggestion_zh=(
             "检查网络可达性、OMBRE_EMBED_API_KEY 是否有效、配额是否耗尽。"
-            "本次写入会记录到 buckets，但不生成向量；下次重试时调用 /api/embeddings/backfill 补齐。"
+            "本次写入仍会保存到 buckets，向量由后台自动重试；也可调用 "
+            "/api/embedding/backfill 手动触发全库对账。"
         ),
     ),
     "OB-E002": ErrorSpec(
@@ -193,7 +194,7 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         suggestion_zh=(
             "★ 这是 OB 自作主张帮你做的事 ★\n"
             "importance≥9 的桶已达硬上限 24，本次新桶被自动降级为 importance=8。\n"
-            "建议：用 breath(importance_min=9) 重读全部「核心事项」，"
+            "建议：用 breath_advanced(importance_min=9) 重读全部「核心事项」，"
             "重新评估每条 importance；不再核心的用 trace(bucket_id, importance=7) 降级。\n"
             "（重新设定 importance 的责任在你，OB 不会替你判断哪条更重要。）"
         ),
@@ -211,10 +212,6 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         ),
     ),
 }
-
-# ImportError 等：在调用方 raise OBStartupError 时使用
-ALL_LEVELS = ("F", "E", "W", "I")
-
 
 # ============================================================
 # 2. 内存日志环形缓冲 / In-memory Log Ring Buffer
@@ -269,6 +266,32 @@ def get_recent_logs(n: int = _LOG_TAIL_FOR_ERROR) -> list[str]:
 
 _errors_path: str | None = None
 _errors_path_lock = threading.Lock()
+_MAX_ERROR_TAIL_SCAN_BYTES = 8 * 1024 * 1024
+_TAIL_CHUNK_BYTES = 64 * 1024
+
+
+def _iter_tail_lines(path: str, *, max_bytes: int):
+    """Yield UTF-8 text lines newest-first from a bounded file tail."""
+
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        remaining = max(0, int(max_bytes))
+        carry = b""
+        while position > 0 and remaining > 0:
+            chunk_size = min(_TAIL_CHUNK_BYTES, position, remaining)
+            position -= chunk_size
+            remaining -= chunk_size
+            handle.seek(position)
+            block = handle.read(chunk_size) + carry
+            parts = block.split(b"\n")
+            carry = parts.pop(0)
+            for raw_line in reversed(parts):
+                yield raw_line.decode("utf-8", errors="replace")
+        # Only yield carry when it starts at byte zero.  If the scan hit its
+        # byte cap, carry is an intentionally incomplete giant/old line.
+        if position == 0 and carry:
+            yield carry.decode("utf-8", errors="replace")
 
 
 def configure_errors_path(buckets_dir: str) -> None:
@@ -302,26 +325,28 @@ def recent_errors(limit: int = 50, min_level: str = "W") -> list[dict]:
     if min_level not in order:
         min_level = "W"
     min_idx = order.index(min_level)
+    out: list[dict] = []
     try:
-        with open(_errors_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with _errors_path_lock:
+            for ln in _iter_tail_lines(
+                _errors_path,
+                max_bytes=_MAX_ERROR_TAIL_SCAN_BYTES,
+            ):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    obj = json.loads(ln)
+                except Exception:
+                    continue
+                lvl = obj.get("level", "W")
+                if lvl in order and order.index(lvl) >= min_idx:
+                    out.append(obj)
+                if len(out) >= limit:
+                    break
     except Exception as e:
         logger.warning(f"[errors] read failed: {e}")
         return []
-    out: list[dict] = []
-    for ln in reversed(lines):
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            obj = json.loads(ln)
-        except Exception:
-            continue
-        lvl = obj.get("level", "W")
-        if lvl in order and order.index(lvl) >= min_idx:
-            out.append(obj)
-        if len(out) >= limit:
-            break
     return out
 
 

@@ -30,6 +30,7 @@ from . import github
 from . import embedding
 from . import ollama_local
 from . import config_api
+from . import onboarding
 from . import v3_debug
 from . import passages
 
@@ -51,6 +52,7 @@ _WEB_MODULES = (
     ("web.embedding", embedding.register),
     ("web.ollama_local", ollama_local.register),
     ("web.config_api", config_api.register),
+    ("web.onboarding", onboarding.register),
     ("web.v3_debug", v3_debug.register),
     # passages：fork 定制 —— passage 窗口留言 / étoile 日记 / trace 统计
     ("web.passages", passages.register),

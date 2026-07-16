@@ -30,12 +30,13 @@ import json
 import asyncio
 import hashlib
 import sqlite3
+import weakref
 import logging
 from typing import Optional
 
 from openai import AsyncOpenAI
 
-from utils import clean_llm_json, count_tokens_approx, positive_float
+from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
 
 try:
     from provider_detect import is_gemini_native_host, strip_native_resource_prefix
@@ -58,7 +59,8 @@ logger = logging.getLogger("ombre_brain.dehydrator")
 # --- 脱水缓存版本号 ---
 # 改任何会影响脱水/合并输出的 prompt 时 +1，使存量缓存自然失效（见 _content_key）。
 # v2：DEHYDRATE/MERGE 加入「视角铁律」，强制保留第一人称（我 / 人名）。
-_PROMPT_VERSION = 2
+# v3：脱水结果只接受既定 JSON schema，隔离模型追加的评论、立场与未知字段。
+_PROMPT_VERSION = 3
 
 # --- LLM 默认参数 ---
 _DEFAULT_MODEL = "gemini-2.0-flash"
@@ -144,6 +146,8 @@ DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水�
 4. 关键数字、日期、名称必须保留
 5. 目标压缩率 > 70%
 6. 严格保留第一人称视角（见下方视角铁律）
+7. 只输出摘要 JSON，JSON 结束后立即停止；禁止附加自己的评论与立场、解释、道德判断、合规声明或角色代入
+8. 只复述输入中明确存在的信息，不得生成原文中不存在的观点、结论或待办
 
 输出格式（纯 JSON，无其他内容）：
 {
@@ -311,6 +315,16 @@ class Dehydrator:
         db_path = os.path.join(config["buckets_dir"], "dehydration_cache.db")
         self.cache_db_path = db_path
         self._cache_conn: sqlite3.Connection = self._init_cache_db()
+        # Keep the cache connection persistent for hot-path lookups, but do not
+        # leak the Windows file handle when a runtime/test instance is released.
+        # ``weakref.finalize`` also runs during interpreter shutdown in reverse
+        # creation order, before an enclosing temporary vault is cleaned up.
+        self._cache_finalizer = weakref.finalize(self, self._cache_conn.close)
+
+    def close(self) -> None:
+        """Close the persistent cache connection; safe to call repeatedly."""
+
+        self._cache_finalizer()
 
     def _init_cache_db(self) -> sqlite3.Connection:
         """Open (or create) the dehydration cache DB; return a persistent connection."""
@@ -330,13 +344,16 @@ class Dehydrator:
         return conn
 
     def _content_key(self, content: str) -> str:
-        """缓存键 = hash(prompt 版本 + 人名 + 原文)。
+        """缓存键 = hash(prompt 版本 + 人名 + 模型配置 + 原文)。
 
         缓存原本只按 content_hash 存，导致脱水 prompt 改了、人名改了，旧的
         third-person 摘要仍会命中缓存返回——视角修复对存量内容不生效。把
-        _PROMPT_VERSION 与 self.human 混进 key，prompt 一升级就自然绕过旧缓存，
-        无需手工删 dehydration_cache.db。"""
-        keyed = f"{_PROMPT_VERSION}|{self.human}|{content}"
+        prompt 版本、人名、api_format、base_url 和 model 混进 key，换模型或端点后
+        下次 breath 会用新配置重新脱水，不会复用旧模型的摘要。"""
+        keyed = (
+            f"{_PROMPT_VERSION}|{self.human}|{self.api_format}|"
+            f"{self.base_url.rstrip('/')}|{self.model}|{content}"
+        )
         return hashlib.sha256(keyed.encode()).hexdigest()
 
     def _get_cached_summary(self, content: str) -> str | None:
@@ -497,7 +514,11 @@ class Dehydrator:
         if self.thinking_budget is not None:
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": self.thinking_budget}
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            r = await client.post(url, params={"key": self.api_key}, json=payload)
+            r = await client.post(
+                url,
+                headers={"x-goog-api-key": self.api_key},
+                json=payload,
+            )
             r.raise_for_status()
         data = r.json()
         candidates = data.get("candidates", [])
@@ -565,6 +586,42 @@ class Dehydrator:
         except (ValueError, TypeError):
             return default_v, default_a
 
+    @staticmethod
+    def _normalize_dehydration_result(raw: str) -> str:
+        """Validate and canonicalize the model response before it crosses the cache boundary.
+
+        Some models return a valid dehydration object and then append a first-person
+        policy or stance statement. Extracting the first JSON value is not enough on
+        its own because a model can also invent extra top-level fields, so rebuild the
+        payload from the documented schema. Content inside a documented field is not
+        heuristically censored: doing that could silently delete a real memory fact.
+        """
+        try:
+            parsed = json.loads(clean_llm_json(raw))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("脱水模型未返回有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("脱水模型返回的 JSON 顶层必须是对象")
+
+        def string_list(field: str) -> list[str]:
+            value = parsed.get(field, [])
+            if not isinstance(value, list):
+                return []
+            return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+        summary = parsed.get("summary", "")
+        emotion_state = parsed.get("emotion_state", "")
+        normalized = {
+            "core_facts": string_list("core_facts"),
+            "emotion_state": emotion_state.strip() if isinstance(emotion_state, str) else "",
+            "todos": string_list("todos"),
+            "keywords": string_list("keywords"),
+            "summary": summary.strip() if isinstance(summary, str) else "",
+        }
+        if not normalized["summary"] and not normalized["core_facts"]:
+            raise ValueError("脱水结果缺少 summary 和 core_facts")
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
     # ---------------------------------------------------------
     # Dehydrate: compress raw content into concise summary
     # 脱水：将原始内容压缩为精简摘要
@@ -592,14 +649,25 @@ class Dehydrator:
         # --- 先查缓存 ---
         cached = self._get_cached_summary(content)
         if cached:
-            return self._format_output(cached, metadata)
+            try:
+                normalized = self._normalize_dehydration_result(cached)
+            except ValueError:
+                # A malformed cache entry must never be surfaced as memory content.
+                self.invalidate_cache(content)
+                logger.warning("discarded invalid dehydration cache entry")
+            else:
+                # Self-heal parseable entries such as `JSON + trailing commentary`.
+                if normalized != cached:
+                    self._set_cached_summary(content, normalized)
+                return self._format_output(normalized, metadata)
 
         # --- API dehydration (no local fallback) ---
         # --- API 脱水（无本地降级）---
         self._require_api()
 
         try:
-            result = await self._api_dehydrate(content)
+            raw_result = await self._api_dehydrate(content)
+            result = self._normalize_dehydration_result(raw_result)
         except Exception as e:
             # --- 本地降级：API（已含重试）彻底失败时，返回原文截断片段而非抛异常。---
             # 让 breath/dream 在 Gemini 抽风时仍能拿到内容（只是没压缩）；不写缓存，
@@ -980,7 +1048,7 @@ class Dehydrator:
             cleaned = self._strip_md_fence(raw)
             data = json.loads(cleaned)
             return {
-                "resolved": bool(data.get("resolved", False)),
+                "resolved": parse_bool(data.get("resolved", False), default=False),
                 "confidence": float(data.get("confidence", 0.0)),
                 "reason": str(data.get("reason", ""))[:_PLAN_REASON_MAX],
             }

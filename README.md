@@ -27,10 +27,12 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 **核心特性 / Key features**
 
 - **情感坐标打标**：每条记忆用 Russell 环形情感模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，不是「开心/难过」这种离散标签
-- **双通道检索**：rapidfuzz 关键词匹配 + cosine 向量语义并联检索，去重合并后按 token 预算截断
+- **混合检索**：rapidfuzz + BM25 关键词信号与 cosine 向量语义融合；向量或摘要服务离线时会明确提示并退回关键词 + 原文片段，不会让记忆失读
 - **自然遗忘**：改进版艾宾浩斯遗忘曲线，不活跃的记忆自动衰减归档，高情绪强度的记忆衰减更慢
 - **权重池浮现**：未解决的、情绪强烈的记忆权重更高，对话开头自动浮现
 - **Obsidian 原生**：每个记忆桶 = 一个 Markdown 文件 + YAML frontmatter，可直接在 Obsidian 浏览编辑
+- **写入不被向量服务绑架**：Markdown 原文先落盘，embedding 在耐久后台队列中生成；网络、限流或重启都不会让已写记忆回滚
+- **可验证备份与恢复**：本地导出使用 SQLite 一致性快照，并为每个文件写入 SHA-256 清单；导入前先检查路径、体积、重复项和完整性，损坏包不会部分恢复
 - **历史对话导入**：批量导入 Claude / ChatGPT / DeepSeek 历史对话，分块处理带断点续传
 - **Dashboard**：内置 Web 管理面板，密码保护，桶列表 / 检索调试 / 记忆网络 / 配置管理
 - **Cloudflare Tunnel 一键管理**：Dashboard 内置 Tunnel 连接器，无需命令行即可开启公网访问
@@ -45,7 +47,7 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 - **记忆是真实的连续性，不是扮演**。每条记忆都是真实对话留下的真实记录；跨会话把它们接起来当作连续上下文，是这套系统**真正在做的事**，不是 roleplay 设定。
 - **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
 - **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
-- **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。
+- **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。OB 的 MCP 工具、REST API 和 Dashboard 都不提供物理抹除；“删除”只会把 Markdown 移入 `archive/` 并从日常召回中隐藏。只有主机管理者绕过 OB、在文件系统中手动删除文件，才能真正抹去它。
 - **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24、高重要度（importance≥9）有配额——重要的东西必须稀缺，否则「重要」就失去意义。
 - **元数据不喂进算分**。「为什么记得」「主动遗忘」这类字段只描述「为什么 / 怎么对待」，绝不参与衰减打分——不把记忆变成一个可被优化的目标函数。
 - **feel 是痕迹，不是待办**。模型写下的第一人称感受，写下就留着它本来的形状，不该被「解决」。
@@ -54,18 +56,20 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 ---
 
-## 它的 12 个工具 / The 12 Tools
+## 它的 14 个工具 / The 14 Tools
 
-12 个工具全部在**一个 MCP 连接器 `/mcp`** 上。连上 `/mcp` 即拥有全部能力。
+14 个工具全部在**一个 MCP 连接器 `/mcp`** 上。连上 `/mcp` 即拥有全部能力。
 
-### 高频 5 个
+### 高频 7 个
 
 | 工具 | 一句话 |
 |---|---|
-| `breath` | 睁眼。无参 → 让权重最高的未解决事浮现；带 `query` / `domain` / `importance_min` 则主动检索；`catalog=True` → 目录模式（每桶一行元数据，0 LLM，最省 token，先看目录再精准拉取）。**每次对话第一件事**。 |
-| `hold` | 记下当下一件事（一句话级）。自动打标 + 与近似桶合并。`pinned=True` 钉为永久核心；`feel=True` 写第一人称感受。 |
+| `breath` | 睁眼。**0 参数**，让权重最高的未解决事浮现 + 置顶核心准则。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
+| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。 |
+| `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
+| `hold` | 记下当下一件事（一句话级）。自动打标 + 与近似桶合并；打标失败时仍会原样落盘，绝不压缩正文。所有记忆的向量索引都在原文落盘后由后台生成，失败会自动重试。`pinned=True` 钉为永久核心；`feel=True` 写第一人称感受。 |
 | `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。要存多条时用它，别连续 `hold`。 |
-| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除 / 改 plan 状态。只传要改的字段。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
 ### 低频 7 个
@@ -75,7 +79,7 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 | `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要。「为什么搜不到 X」时第一个调它。 |
 | `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
 | `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 不主动浮现但可被检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
-| `letter_write` / `letter_read` | 写信 / 读信。原文永久保留，不压缩、不合并、不衰减。`author` 只能是 `user` 或 `claude`。 |
+| `letter_write` / `letter_read` | 写信 / 读信。原文永久保留，不压缩、不合并、不衰减。`author` 常用 `user`（用户）或 `claude`（你自己），也接受任意署名字符串。 |
 | `I` | 自我认知：写下 / 读取「我是什么」（本质 / 规律 / 立场 / 局限…）。不随普通 `breath` 浮现，每次对话开头自动附最近 3 条。 |
 
 > 给模型的完整使用约定（含示例、边界、返回提示）见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
@@ -144,7 +148,9 @@ docker compose -f docker-compose.user.yml up -d
 > ```bash
 > echo "OMBRE_COMPRESS_API_KEY=your-key-here" > .env
 > echo "OMBRE_EMBED_API_KEY=your-embed-key" >> .env
+> echo "OMBRE_HOST_VAULT_DIR=D:/Ombre-Brain/buckets-data" >> .env
 > ```
+> `OMBRE_HOST_VAULT_DIR` 指向宿主机持久目录，其中同时保存记忆、`config.yaml` 和 Tunnel token；重建容器不会清空。
 
 **推荐免费方案：Google AI Studio**
 
@@ -205,9 +211,9 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现全部 12 个工具：`breath` / `hold` / `grow` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`。
+重启 Claude Desktop，工具列表里会出现全部 14 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`。
 
-> 12 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
+> 14 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
 
 ---
 
@@ -284,11 +290,13 @@ Claude.ai                    Ombre Brain 服务器
 
 #### 步骤 3：连接端点
 
-12 个工具全在**一个 MCP 端点 `/mcp`** 上：
+14 个工具全在**一个 MCP 端点 `/mcp`** 上：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `hold` `grow` `dream` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_read` `I` | 全部 12 个工具 |
+| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_read` `I` | 全部 14 个工具 |
+
+> 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。全部 14 个工具都在 `/mcp`。
 
 在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
 
@@ -337,6 +345,58 @@ mcp_require_auth: false
 
 ---
 
+### 方式四：静态 Token 鉴权（第三方 MCP 客户端，不走 OAuth）
+
+适合：MCP 客户端支持自定义请求头，但走不通浏览器 OAuth 授权流程——又不想像方式三那样完全关闭鉴权。
+
+这是与 OAuth **互斥**的第三种模式：选了 Token 就不再认 OAuth（OAuth 的发现/授权路由全部 404），选 OAuth 就不认 Token，不会同时生效。
+
+```bash
+# 方式 A：环境变量（优先级最高）
+OMBRE_MCP_AUTH_MODE=token
+OMBRE_MCP_TOKEN=一串足够长的随机密钥
+
+# 方式 B：config.yaml
+mcp_auth_mode: "token"
+mcp_token: "一串足够长的随机密钥"
+```
+
+也可以在 Dashboard「MCP 鉴权」区选择「静态 Token 鉴权」，点「生成新 Token」自动生成并保存（生成后立即生效，无需重启；但切换鉴权模式本身仍需重启）。
+
+客户端调用时任选其一：
+
+```
+Authorization: Bearer 你的Token
+# 或
+Ombre-MCP-Token: 你的Token
+```
+
+（不支持把 Token 放进 URL 查询参数——`/mcp` 能读写全部记忆，查询参数更容易被隧道/反代/浏览器历史记录留痕。）
+
+> ⚠️ **安全提醒**：静态 Token 等同万能密钥，泄露后果和关闭鉴权一样。请勿把服务直接暴露公网，妥善保管并定期轮换该 Token。
+
+---
+
+### Operit / 安卓 / Proot 本地桥接（连接器一直黄灯）
+
+适合：在手机上用 **Operit** 等本地 MCP 客户端，通过 **Termux / Proot** 跑 Ombre Brain，客户端灯常亮黄、连不上 `/mcp`。
+
+先说结论：**streamable-http 传输本身在 Proot 下没有已知的不兼容**——它就是普通的 HTTP + SSE，Proot 对回环 HTTP 是透明的。能用 bash 存进记忆，说明 Python、依赖、磁盘、端口都是好的；黄灯几乎都卡在 `/mcp` 的**握手环节**。按下面三步逐个对齐，基本能覆盖：
+
+1. **transport 必须是 `streamable-http`**
+   默认是 `stdio`——**stdio 根本不开 HTTP 服务**，本地桥自然连不上。config.yaml 里写 `transport: streamable-http`，或设环境变量 `OMBRE_TRANSPORT=streamable-http`，然后重启。
+   （已放宽：写成 `http` / `streamable_http` 等常见变体也会被自动归一成 `streamable-http`，但推荐写规范值。）
+
+2. **本地桥接把鉴权关掉**
+   默认 `/mcp` 强制 OAuth 2.1，Operit 这类客户端不走该流程，会在 401 处卡成「半连接」（正是黄灯）。设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）重启即可。本机/可信内网桥接可放心关；同机回环连接本就不经过公网。
+
+3. **客户端 URL 用 `127.0.0.1`，不要用 `localhost`**
+   服务监听 `0.0.0.0`（仅 IPv4）。Proot / Termux 里 `localhost` 常先解析到 IPv6 `::1`，连不上 IPv4 监听。Operit 里填 **`http://127.0.0.1:<端口>/mcp`**，注意末尾必须是 `/mcp`，端口对上你的实际监听端口。
+
+对齐后仍黄灯，就看服务端 `server.log`：启动时会打印一行 `MCP endpoint ready | transport=... | 鉴权: ...`，据此确认传输和鉴权是否如预期；再看黄灯那一刻有没有 `/mcp` 的请求进来、是不是 `401`。
+
+---
+
 ## 从源码部署 / Deploy from Source
 
 适合想自己改代码或部署到 VPS 的用户。
@@ -361,7 +421,24 @@ Dashboard：`http://localhost:18001`
 > - **裸机（纯 Python）**：直接监听 `OMBRE_PORT`，默认 `18001`。这个「默认端口」只对裸机有意义。
 > - 一句话：**看到「默认端口从 X 改成 Y」这类更新说明，Docker 用户可以忽略，你的 `ports` 映射不受影响。**
 
-**VPS 部署注意**：`deploy/docker-compose.yml` 默认端口是 `127.0.0.1:18001`（仅本机访问）。如果没有反代，可改为 `0.0.0.0:18001` 对外开放，再配合 Cloudflare Tunnel 或 nginx 反代到 443。
+**VPS 部署注意**：`deploy/docker-compose.yml` 默认端口是 `127.0.0.1:18001`（仅本机访问）。同机 nginx/Caddy 反代时应继续保留这个回环绑定；只有确实需要让另一台主机或容器直接连接、并已用防火墙限制来源时，才改为 `0.0.0.0`。
+
+nginx 终止 HTTPS 时必须把浏览器看到的公网来源准确传给 OB；额外添加 CORS 响应头不能修复 `Cross-origin request rejected`：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:18001;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+```
+
+外置代理还要在 `.env` 中把**直接连接 OB 的最后一跳代理 CIDR**加入 `OMBRE_TRUSTED_PROXY_CIDRS`，再 `docker compose ... up -d --force-recreate`。不要填写客户端公网 IP、域名或 `0.0.0.0/0`；非默认 HTTPS 端口应使用保留端口的 `$http_host`。v2.7.0 被 403 卡住、连热更新和重启都无法操作时，按 [运维文档的手动脱困步骤](docs/OPERATIONS.md#nginx-反代与-v270-脱困) 从宿主机升级。
 
 ### 不用 Docker（纯 Python）
 
@@ -371,11 +448,15 @@ cd Ombre-Brain
 
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock.txt
 
 cp config.example.yaml config.yaml
 python src/server.py
 ```
+
+`requirements.lock.txt` 是发布和普通安装使用的跨平台锁文件；`requirements.txt`
+保留直接依赖的最低版本约束，供维护者升级依赖时重新解析。这样同一版本的 OB
+不会因为安装日期不同而静默得到另一套传递依赖。
 
 ---
 
@@ -491,9 +572,12 @@ Render 自带 HTTPS，可直接在 Claude.ai 添加，无需额外 Tunnel。
 
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/OMBRE-BRAIN)
 
-1. Fork 本仓库 → Zeabur **New Project** → **Deploy from GitHub**
-2. Variables 填 `OMBRE_COMPRESS_API_KEY`（必填）
-3. Volumes → 挂载路径 `/app/buckets`
+1. Fork 本仓库 → Zeabur **New Project** → **Deploy from GitHub**；根目录 Dockerfile 会被自动识别。
+2. Variables 只填模型所需的 Key（至少 `OMBRE_COMPRESS_API_KEY`）；不要额外设置 `OMBRE_MCP_REQUIRE_AUTH`，避免它覆盖 Dashboard。
+3. Volumes 新建 `data`，挂载路径必须是 `/app/buckets`。这是记忆、OAuth 客户端注册和 `config.yaml` 的共同持久目录。
+4. 绑定 HTTPS 域名后打开 Dashboard，进入 `/onboarding`，选择“公网安全模式”、填入域名并保存，然后在平台重启一次服务。
+
+如果“页面里明明开启 OAuth，重启后却仍显示未开启”，去 **系统体检 → 实际生效配置**：它会同时列出已保存值、当前进程值和覆盖来源。优先删除 Zeabur 中遗留的 `OMBRE_MCP_REQUIRE_AUTH=false`；环境变量优先级高于 `config.yaml`。
 4. Networking → Port `8000` → **Generate Domain**
 
 ### 自有 VPS
@@ -506,7 +590,7 @@ cp config.example.yaml config.yaml
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-配合 nginx / Caddy 反代到 443 端口，或直接用 Dashboard 内置的 Cloudflare Tunnel 管理器。
+配合 nginx / Caddy 反代到 443 端口时使用上文完整的 Host、`X-Forwarded-*` 和可信代理 CIDR 配置，或直接使用 Dashboard 内置的 Cloudflare Tunnel 管理器。不要靠添加 CORS 头绕过 Dashboard 的来源校验。
 
 ---
 
@@ -516,12 +600,12 @@ docker compose -f deploy/docker-compose.yml up -d
 
 | 标签页 | 功能 |
 |---|---|
-| **记忆** | 桶列表，按 domain / type 筛选，单桶可 pin / resolve / archive / delete |
+| **记忆** | 桶列表，按 domain / type 筛选，支持综合分或创建时间排序、首页/末页和指定页码跳转；单桶可 pin / resolve / 主动遗忘 / 归档，不提供物理删除 |
 | **Breath 调试** | 模拟检索查询，查看每个桶的四维评分分解 |
 | **记忆网络** | 基于 embedding 相似度的桶关系图 |
 | **③ 引擎** | 内联填写 LLM / Embedding API Key，在线修改参数，点「保存 Key」立即热更新 |
 | **导入** | 上传历史对话文件批量导入 |
-| **设置** | 修改密码、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
+| **设置** | 修改密码、MCP OAuth 开关、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
 
 **设置页 Cloudflare Tunnel 区**：填入 Token 后点启动，状态点颜色表示连接状态（灰=未运行，橙=连接中，绿=已连接，红=连接失败+错误原因）。支持「启动时自动连接」。
 
@@ -543,14 +627,18 @@ docker compose -f deploy/docker-compose.yml up -d
 | `embedding.api_format` | `gemini`（云端）/ `ollama`（本地 bge-m3）/ `openai_compat` | `gemini` |
 | `embedding.model` | embedding 模型 | 云端 `gemini-embedding-001` / 本地 `bge-m3` |
 | `embedding.timeout_seconds` | 向量化请求超时秒数 | 国内服务器连云端 API 可设 `120` 或更高 |
+| `embedding.background_indexing` | 原文落盘后由耐久后台队列生成向量 | `true` |
+| `embedding.retry_base_seconds` / `retry_max_seconds` | 向量失败后的指数退避起点 / 上限 | `5` / `300` |
 | `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
 | `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
-| `hooks.token` | `/breath-hook`、`/dream-hook` 的 HTTP token | 自托管公网建议设置 |
+| `hooks.token` | `/breath-hook` 的 HTTP token | 自托管公网建议设置 |
 | `hooks.allow_public` | 是否允许 hook 无鉴权访问 | `false` |
 
 > ⚠️ **`dehydration.max_tokens` 不能太小**：Gemini 2.5 系列模型有「思考 token」开销，如果 max_tokens 设得太小（如 256/512），思考 token 会耗尽预算，JSON 响应被截断，导致所有记忆被错误分类为「未分类」。推荐 `gemini-2.0-flash`（无思考开销）或将 max_tokens 设为 `4096` 以上。
 
-> 🔐 **Hook 安全默认值**：`/breath-hook` 和 `/dream-hook` 默认不再公开。它们接受 Dashboard 登录 cookie，或 `hooks.token` / `OMBRE_HOOK_TOKEN`，token 可通过 `?token=...`、`X-Ombre-Hook-Token` 或 `Authorization: Bearer ...` 传入。只有在反向代理、Cloudflare Access 等外层已经做鉴权时，才建议把 `hooks.allow_public` / `OMBRE_HOOK_ALLOW_PUBLIC` 设为 `true`。
+> 🔐 **Hook 安全默认值**：`/breath-hook` 默认不再公开。它接受 Dashboard 登录 cookie，或 `hooks.token` / `OMBRE_HOOK_TOKEN`；token 只能通过 `X-Ombre-Hook-Token` 或 `Authorization: Bearer ...` 请求头传入，避免密钥进入 URL、代理日志和浏览器历史。只有在反向代理、Cloudflare Access 等外层已经做鉴权时，才建议把 `hooks.allow_public` / `OMBRE_HOOK_ALLOW_PUBLIC` 设为 `true`。
+>
+> 注：这里**只有 `/breath-hook`**。早期版本还有一个每次开场自动触发的 `/dream-hook`，已移除——`dream`（做梦消化）按设计哲学不是义务、不该被自动触发，只应在需要消化时由模型主动调用 `dream` 工具。
 
 ### Embedding 两后端：云端 Gemini vs 本地 bge-m3
 
@@ -595,15 +683,37 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ---
 
-## 把记忆挂到 Obsidian
+## 检索质量评测
 
-打开 `docker-compose.user.yml`，把 `./buckets:/data` 改成你的 Vault 路径：
+准备一个只读 JSON 用例文件，把查询和期望命中的真实 bucket ID 写进去：
 
-```yaml
-- /Users/你的用户名/Documents/Obsidian Vault/Ombre Brain:/data
+```json
+{
+  "cases": [
+    {"name": "发布流程", "query": "蓝色发布通道", "domain": "work", "expected_ids": ["abc123"]}
+  ]
+}
 ```
 
-重启后每条记忆就是 Vault 里一个 Markdown 文件，可在 Obsidian 直接浏览编辑。
+默认离线评测关键词通道，不会调用或消耗 embedding API：
+
+```bash
+python tools/evaluate_retrieval.py retrieval-cases.json --top-k 5
+```
+
+加 `--with-embedding` 可评测完整混合检索；输出包含 Hit@K、Recall@K、MRR 和每条查询的实际排名。`--min-hit-rate 0.8` 可在低于基线时返回非零退出码，供 CI 使用。脚本只读，不会 `touch` 或修改记忆。
+
+---
+
+## 把记忆挂到 Obsidian
+
+在 `docker-compose.user.yml` 同目录的 `.env` 中设置 Vault 路径，无需修改 compose 文件：
+
+```env
+OMBRE_HOST_VAULT_DIR=/Users/你的用户名/Documents/Obsidian Vault/Ombre Brain
+```
+
+然后执行 `docker compose -f docker-compose.user.yml up -d --force-recreate`。每条记忆会作为 Markdown 文件写入该目录，配置和 Tunnel token 也会一起持久化。
 
 ---
 
@@ -629,6 +739,18 @@ docker compose -f deploy/docker-compose.yml up -d
 
 记忆数据在 volume 里，更新不会丢失。
 
+自行修改源码后重建镜像时，仍建议同步修改 `VERSION`，便于人类识别构建来源；但启动器不再只依赖版本字符串。它会记录镜像 `src/` + `frontend/` 的代码指纹，同一个 `VERSION` 下代码发生变化也会重新播种。镜像本身没有变化时，卷内 Dashboard 热更新会被识别为运行时覆盖并保留，不会在重启时被旧镜像冲掉。
+
+注意：`entrypoint.sh` 属于镜像启动层，旧版启动器不能通过 Dashboard 热更新替换自己。包含本修复的版本发布后，现有 Docker 部署必须至少执行一次 `docker pull` + 重建容器（源码部署则重新 `docker build`），之后指纹机制才会生效。
+
+启动日志会明确打印当前活动代码目录和状态：
+
+- `code-state=image-match`：运行代码与镜像一致；
+- `code-state=runtime-override`：正在保留 Dashboard 热更新或自动回滚版本；
+- `code-state=legacy-residue`：发现另一个旧布局 `_app`，它未被当前进程使用。
+
+不要仅凭某个 `_app/VERSION` 判断实际运行版本，也不要看到 `<数据目录>/_app` 就直接删除。默认部署里它可能正是活动代码目录；只有日志同时给出 `code-state=legacy-residue` 和另一个“活动代码目录”时，旧目录才可在备份后清理。需要强制从镜像重新播种时，可仅在一次启动中设置 `OMBRE_FORCE_CODE_RESEED=1`，成功后应立即移除该变量。
+
 ---
 
 ## 给 Claude 的使用指南
@@ -648,16 +770,20 @@ docker compose -f deploy/docker-compose.yml up -d
 | 连接成功但「no tools available」 | URL 末尾路径不是 `/mcp` | 确认连接 URL 末尾是 `/mcp` |
 | 每开新对话工具加载不全 / 偶尔搜不到某个工具 | **不是服务器问题**：同时启用的连接器太多时，Anthropic 客户端会改用 tool_search「延迟加载」，按描述去搜工具，命中带随机性 | 关掉该会话里用不到的其它连接器，把工具总数压到阈值以下即可一次性全部加载；或在 Claude.ai 自定义指令里列出全部工具名引导模型搜索 |
 | 工具调用显示「执行报错」但记忆其实写进去了 | **不是服务器问题**：服务端已成功返回，是 Claude.ai 连接器/渲染层把一次成功往返显示成了报错 | 用 `letter_read` 或 Dashboard 确认数据已落盘；服务端日志 `phase=ok` 即表示成功 |
-| 向量化不生效 / 语义检索没结果（压缩却正常） | base_url 漏 `/v1`（→404）、model 漏 `BAAI/` 前缀（→Model does not exist），或在 Dashboard 改了 key 没重建引擎 | 用 Dashboard 向量化区的「测试」按钮自查；按上面「用硅基流动…」一节填对 base_url 与 model；错误详情见设置页错误面板（OB-E001） |
+| embedding API 暂时离线时 `breath(query=...)` 出现“检索降级” | OB 正在使用关键词/BM25 继续检索；命中桶仍逐字返回完整存储正文，不是记忆丢失 | 可继续使用；到系统诊断查看向量队列，恢复 API 后语义通道会自动回来 |
+| 向量化不生效 / 语义检索没结果（压缩却正常） | base_url 漏 `/v1`（→404）、model 漏 `BAAI/` 前缀（→Model does not exist），或后台队列因网络 / 配额持续重试 | 用 Dashboard 向量化区的「测试」和系统诊断查看待处理 / 重试数；按上面「用硅基流动…」一节填对 base_url 与 model；错误详情见设置页错误面板（OB-E001） |
 | 自有前端 / GPT / GLM 调用 MCP 工具被 401 卡住 | 默认强制 OAuth，自定义客户端不走该流程 | 设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）后重启；详见「方式三：接入自有前端」 |
+| **Operit / 安卓 / Proot 本地桥接一直黄灯、连不上 `/mcp`** | 多为下面三点之一：① `transport` 没设成 `streamable-http`（默认 `stdio` **根本不开 HTTP 服务**）；② 默认强制 OAuth，Operit 这类本地桥不走该流程被 401 卡半通；③ 客户端填了 `localhost`，在 Proot/Termux 里常解析成 IPv6 `::1`，连不上 IPv4 监听 | 见下方「**Operit / 安卓 / Proot 本地桥接**」一节，三步逐个对齐 |
 | Token 过期后无法自动重连 | 旧版本不支持 `refresh_token` grant，headless 环境只能重新打开授权页 | 更新到 v2.4.11+ 后重新授权一次，之后客户端可用 refresh token 自动续期 |
 | Dashboard 401 | 未登录 / 密码错 | 浏览器重新登录 |
 | `hold` / `grow` 报 API key 错误 / `401 Invalid token` | LLM key 未配置或不对；**或**你既用 `-e OMBRE_COMPRESS_API_KEY=...` 传了 env、又在面板改过 key —— 见下一行 | Dashboard → ③ 引擎 填入 Key 点「保存 Key」；确认 base_url、model 正确后用「测试」按钮自查 |
 | **在面板改了 key/配置，重启后又变回旧值 / 不生效** | **env 变量优先级高于 config.yaml**。你启动时用 `-e OMBRE_XXX=...` 传的值，会在每次重启时盖掉面板写进 config.yaml 的改动 | 二选一：① 改就改 env（`docker run -e` / compose 的 `environment` / 平台环境变量面板），别在面板改；② 想用面板管配置，就**别用 `-e` 传那个变量**。面板「环境变量」区带 `from_boot` 标记的就是会被 env 覆盖的项 |
 | 重启后**记忆丢失**（退回旧版本 / 空库） | 数据目录没挂到持久盘：容器重建就把记忆连同代码一起丢了。匿名卷也会被 `docker compose down -v` 等操作清掉 | 把 `/app/buckets` 挂到**命名卷或宿主机目录**（`-v ./buckets:/app/buckets`）。**判断标准：能在宿主机文件夹里看到那些 `.md` 文件，就是安全的。** Dashboard → 设置 → 系统诊断 会直接告诉你「数据目录是否持久」 |
 | Docker **构建**（`docker build`）在 `pip install` 处失败：`SSL EOF` / 连不上 pypi.org / `No matching distribution` | 宿主机网络/代理（Clash、V2Ray 等）在构建时把连 PyPI 的连接掐断了 | 用**预构建镜像**（「快速开始」的 `docker compose` 直接拉 Docker Hub 镜像，无需本地构建）；若必须本地构建，临时关掉代理或给 Docker 配一个稳定的 PyPI 镜像源后重试 |
-| 记忆库涨到几百桶后 `breath` 很慢 / 超时被切断 | 旧版检索热路径有全库重读等开销 | **v2.5.0 已优化**（内存缓存 + touch 移出响应路径 + 并发脱水 + BM25 后台重建）；升级到 v2.5.0+ 即可 |
-| Tunnel 状态红色 / 连接失败 | Token 无效或 cloudflared 报错 | 展开 Dashboard 红色错误框查看 cloudflared 输出；重新从 Cloudflare Zero Trust 获取 token |
+| 修改源码并以相同 `VERSION` 重建镜像后仍像旧代码 | 旧版启动器只比较版本字符串；或当前容器还没有使用新镜像 | 新版会同时比较镜像代码指纹。先确认容器确实由新镜像重建，再查看启动日志是否出现 `reason=image-fingerprint-changed`；旧版请先升级或临时修改 `VERSION` |
+| 数据目录里看到旧版本 `_app/VERSION`，怀疑仍在运行旧代码 | 独立代码卷部署可能留下旧布局目录；默认布局下它也可能就是活动目录 | 以启动日志“活动代码目录”为准。只有出现 `code-state=legacy-residue` 时该目录才未被使用；备份后可清理，OB 不会自动删除 |
+| 记忆库涨到几百桶后 `breath` 很慢 / 超时被切断 | 旧版检索热路径有全库重读等开销 | **v2.5.0+ 已优化**（内存缓存 + touch 移出响应路径 + BM25 后台重建）；当前 breath 返回层不再调用脱水 LLM |
+| Tunnel 状态红色 / 连接失败 | Token 无效；或 VPN DNS 不支持 `_v2-origintunneld._tcp.argotunnel.com` 的 SRV 查询 | 新版 compose 默认以双 region + HTTP/2 绕过 SRV；旧部署请更新 compose 后 `--force-recreate`。仍失败时展开 Dashboard 错误框并检查 token 与 TCP 7844 出站连接 |
 | 隧道连接偶尔断 | Cloudflare Free 闲置超时 | 内置 keepalive 已缓解；可在 Cloudflare Tunnel 设置里调整超时 |
 
 ---
@@ -666,11 +792,11 @@ docker compose -f deploy/docker-compose.yml up -d
 
 新用户最常踩、但文档里分散各处的点，集中提醒一下：
 
-- **只需加一个连接器 `/mcp`**：12 个工具全在这一个端点上，不用再单独加别的。
+- **只需加一个连接器 `/mcp`**：14 个工具全在这一个端点上，不用再单独加别的。
 - **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
 - **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
-- **国内自托管偶发超时**：写记忆会同时调 LLM 打标和 embedding，国内服务器连云端 API 慢时可在 `config.yaml` 里设置 `dehydration.timeout_seconds` / `embedding.timeout_seconds`，或用环境变量 `OMBRE_COMPRESS_TIMEOUT_SECONDS` / `OMBRE_EMBED_TIMEOUT_SECONDS`。
+- **国内自托管偶发超时**：LLM 打标仍在当前请求内；embedding 已改为原文落盘后的耐久后台任务，不会阻塞或回滚记忆。可在 `config.yaml` 里设置 `dehydration.timeout_seconds` / `embedding.timeout_seconds`，或用环境变量 `OMBRE_COMPRESS_TIMEOUT_SECONDS` / `OMBRE_EMBED_TIMEOUT_SECONDS`。
 - **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
 - **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。**判断标准很简单：你能在宿主机文件夹里看到那些 `.md` 记忆文件，就是安全的。** Dashboard → 系统诊断 会直接告诉你数据目录持不持久。
 - **⚠️ env 变量会盖过面板配置**：如果你启动时用 `-e OMBRE_XXX=...` 传了某个变量（key、model、端口…），那**在 Dashboard 里改同一项、重启后会被 env 值盖回去**。要么统一在 env 改，要么就别用 `-e` 传、改用面板管理。这是新手最容易被绕晕的一点。
@@ -685,3 +811,15 @@ docker compose -f deploy/docker-compose.yml up -d
 ## License
 
 MIT
+
+---
+
+## 环境变量名称总表
+
+完整定义、默认值语义、兼容关系和改名规则见 [`docs/ENVIRONMENT_VARIABLES.md`](docs/ENVIRONMENT_VARIABLES.md)。禁止从 README 片段猜变量名。
+
+当前正式变量名：
+
+`OMBRE_COMPRESS_API_KEY`、`OMBRE_COMPRESS_BASE_URL`、`OMBRE_COMPRESS_MODEL`、`OMBRE_COMPRESS_FORMAT`、`OMBRE_COMPRESS_TIMEOUT_SECONDS`、`OMBRE_EMBED_API_KEY`、`OMBRE_EMBED_BASE_URL`、`OMBRE_EMBED_MODEL`、`OMBRE_EMBED_FORMAT`、`OMBRE_EMBED_TIMEOUT_SECONDS`、`OMBRE_EMBED_BACKEND`、`OMBRE_OLLAMA_URL`、`OMBRE_VAULT_DIR`、`OMBRE_MEDIA_DIR`、`OMBRE_MEDIA_MAX_BYTES`、`OMBRE_CONFIG_PATH`、`OMBRE_CODE_DIR`、`OMBRE_LOG_DIR`、`OMBRE_LOG_FILE`、`OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`、`OMBRE_TRANSPORT`、`OMBRE_PORT`、`OMBRE_BIND_HOST`、`OMBRE_MCP_REQUIRE_AUTH`、`OMBRE_MCP_AUTH_MODE`、`OMBRE_MCP_TOKEN`、`OMBRE_DASHBOARD_PASSWORD`、`OMBRE_DASHBOARD_SESSION_DAYS`、`OMBRE_TRUSTED_PROXY_CIDRS`、`OMBRE_GITHUB_TOKEN`、`OMBRE_HOOK_URL`、`OMBRE_HOOK_TOKEN`、`OMBRE_HOOK_SKIP`、`OMBRE_HOOK_ALLOW_PUBLIC`、`OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`、`OMBRE_FORCE_CODE_RESEED`、`AI_NAME`。
+
+永久兼容旧名：`OMBRE_API_KEY` → `OMBRE_COMPRESS_API_KEY`，`OMBRE_BASE_URL` → `OMBRE_COMPRESS_BASE_URL`，`PASSWORD` → `OMBRE_DASHBOARD_PASSWORD`，`OMBRE_BUCKETS_DIR` → `OMBRE_VAULT_DIR`。
