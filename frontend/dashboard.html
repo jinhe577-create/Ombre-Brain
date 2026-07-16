@@ -318,11 +318,18 @@
     top: 12px;
     width: 440px;
     height: calc(100vh - 24px);
+    /* fork 修正：iOS Safari 的 100vh 含被地址栏/工具栏遮住的区域，面板底部
+       （编辑按钮）会伸到屏幕外。dvh = 动态可视高度，支持的浏览器用它覆盖。 */
+    height: calc(100dvh - 24px);
     background: var(--surface-solid);
     border: none;
     border-radius: 24px;
     padding: 0 28px 32px;
     overflow-y: auto;
+    /* fork 修正：面板滚到头时不把滚动传导给底下页面——否则 iOS 上松手回弹、
+       主页面被顶到错位后卡住拉不回来。 */
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     transform: translateX(calc(100% + 24px));
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     z-index: 100;
@@ -811,7 +818,14 @@
     .bucket-row { padding: 12px 14px; gap: 4px; }
     .bucket-row-tags { display: none; }
     .bucket-row .time { display: none; }
-    .detail-panel { width: calc(100vw - 16px); right: 8px; top: 8px; height: calc(100vh - 16px); }
+    .detail-panel {
+      width: calc(100vw - 16px);
+      right: 8px;
+      top: 8px;
+      height: calc(100vh - 16px);
+      height: calc(100dvh - 16px);  /* iOS 动态视口：底部不再被工具栏吃掉 */
+      padding: 0 16px 24px;
+    }
 
     /* ── Settings forms ── */
     .config-row, .form-row { flex-wrap: wrap; }
@@ -1709,6 +1723,7 @@
     top: 0;
     width: min(460px, 100vw);
     height: 100vh;
+    height: 100dvh;  /* iOS 动态视口：底部不被工具栏遮挡 */
     background: var(--surface-solid);
     z-index: 300;
     display: flex;
@@ -1791,6 +1806,8 @@
   .self-panel-body {
     flex: 1;
     overflow-y: auto;
+    overscroll-behavior: contain;  /* 滚到头不传导给底下页面（iOS 回弹卡死） */
+    -webkit-overflow-scrolling: touch;
     padding: 16px 24px 32px;
     display: flex;
     flex-direction: column;
