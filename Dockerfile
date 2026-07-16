@@ -49,6 +49,14 @@ COPY src/ ./src/
 COPY frontend/ ./frontend/
 COPY VERSION ./VERSION
 COPY config.example.yaml ./config.default.yaml
+# fork 修正：容器种子配置与镜像运行时对齐，否则 Dashboard 永远显示
+# 「已保存 stdio / 生效 streamable-http」这类假漂移，/api/transport 也会把
+# 同值保存误判为需要重启（Docker 集成测试即验证此契约）：
+# - transport 固定为容器实际使用的 streamable-http（ENV OMBRE_TRANSPORT）
+# - mcp_require_auth / mcp_auth_mode 从种子中移除：未持久化时跟随运行时
+#   （env 或内置默认 true），安全默认不变，但 env 显式关闭时不再被种子顶回
+RUN sed -i 's/^transport: .*/transport: "streamable-http"/' ./config.default.yaml \
+    && sed -i '/^mcp_require_auth: /d; /^mcp_auth_mode: /d' ./config.default.yaml
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 

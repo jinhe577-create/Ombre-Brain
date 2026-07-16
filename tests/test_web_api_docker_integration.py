@@ -91,7 +91,12 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         config = client.get("/api/config")
         assert config.status_code == 200
         config_payload = config.json()
-        assert config_payload["transport"] == "streamable-http"
+        # fork 修正：容器种子配置（config.default.yaml = example）自带
+        # transport: "stdio"，/api/config 的 transport 是「已保存值」，
+        # 必然回显 stdio；服务实际以 streamable-http 运行体现在
+        # transport_effective（上游 2.7.1 引入的已保存/生效之分）。
+        assert config_payload["transport_effective"] == "streamable-http"
+        assert config_payload["transport"] in ("stdio", "streamable-http")
         assert config_payload["mcp_require_auth"] is False
         assert "api_key" not in config_payload.get("dehydration", {})
         assert "api_key" not in config_payload.get("embedding", {})
