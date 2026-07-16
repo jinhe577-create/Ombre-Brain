@@ -92,7 +92,10 @@ _AUTHOR_NOTE = {
 # --- 热更新来源与依赖安装的安全闸门（安全加固 #2）---
 # do-update 会把远端 zip 覆盖到 src/ 并 pip install，等于把「谁能改 config.update」
 # 直接放大成 RCE。默认只信官方仓；fork/自建源需显式 env 放行。自动 pip 默认关闭。
-_TRUSTED_UPDATE_REPOS = ("p0luz/ombre-brain",)
+# fork 定制：本 fork 的一键更新拉的是自己的仓库（jinhe577-create），
+# 对本部署而言它就是官方源，与上游同级可信；其它任意仓库仍走
+# OMBRE_ALLOW_CUSTOM_UPDATE_REPO 显式放行，安全闸门语义不变。
+_TRUSTED_UPDATE_REPOS = ("jinhe577-create/ombre-brain", "p0luz/ombre-brain")
 _MAX_UPDATE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_UPDATE_MEMBERS = 5_000
 _MAX_UPDATE_MEMBER_BYTES = 16 * 1024 * 1024

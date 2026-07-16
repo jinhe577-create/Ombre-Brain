@@ -20,7 +20,7 @@ from utils import (
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
     """隔离掉可能影响路径解析的环境变量，返回一个存在的假数据目录。"""
-    for var in ("OMBRE_CONFIG_PATH", "OMBRE_VAULT_DIR", "OMBRE_BUCKETS_DIR"):
+    for var in ("OMBRE_CONFIG_PATH", "OMBRE_VAULT_DIR", "OMBRE_BUCKETS_DIR", "RENDER"):
         monkeypatch.delenv(var, raising=False)
     data_dir = tmp_path / "disk"
     data_dir.mkdir()
@@ -29,6 +29,8 @@ def clean_env(monkeypatch, tmp_path):
 
 
 def test_config_path_prefers_existing_data_dir_file(clean_env, monkeypatch):
+    """Render 环境（RENDER=true，2.6.13 上游语义）：config 落持久盘。"""
+    monkeypatch.setenv("RENDER", "true")
     monkeypatch.setenv("OMBRE_BUCKETS_DIR", str(clean_env))
     cfg = clean_env / "config.yaml"
     cfg.write_text("dehydration: {model: test}\n", encoding="utf-8")
@@ -36,7 +38,8 @@ def test_config_path_prefers_existing_data_dir_file(clean_env, monkeypatch):
 
 
 def test_config_path_first_write_lands_on_data_dir(clean_env, monkeypatch):
-    """数据目录已挂载但还没有 config.yaml（首次保存）→ 写入路径应指向数据目录。"""
+    """Render 数据盘已挂载但还没有 config.yaml（首次保存）→ 写入路径指向持久盘。"""
+    monkeypatch.setenv("RENDER", "true")
     monkeypatch.setenv("OMBRE_BUCKETS_DIR", str(clean_env))
     assert config_file_path() == str(clean_env / "config.yaml")
 

@@ -42,3 +42,14 @@ def test_dashboard_hot_update_surfaces_csrf_proxy_guidance():
     assert "failure.error === 'Cross-origin request rejected'" in block
     assert "这不是 CORS 缺失" in block
     assert "OMBRE_TRUSTED_PROXY_CIDRS" in block
+
+
+def test_fork_repo_is_trusted_update_source():
+    """fork 仓库必须在热更新可信白名单里，否则一键更新会被安全闸门拒绝。"""
+    import sys
+    sys.path.insert(0, str(ROOT / "src"))
+    from web import meta
+
+    assert meta._update_repo_allowed(FORK_REPO)
+    assert meta._update_repo_allowed("P0luz/Ombre-Brain")
+    assert not meta._update_repo_allowed("evil/repo")
