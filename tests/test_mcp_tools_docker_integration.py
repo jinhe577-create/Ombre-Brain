@@ -38,6 +38,9 @@ EXPECTED_TOOLS = {
     "letter_read",
     "I",
     "dream",
+    # fork 定制工具
+    "passage",
+    "etoile",
 }
 
 EXPECTED_TOOL_PROPERTIES = {
@@ -100,6 +103,9 @@ EXPECTED_TOOL_PROPERTIES = {
     "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
     "I": {"content", "aspect", "read", "limit"},
+    # fork 定制工具
+    "passage": {"content", "valence"},
+    "etoile": {"content", "valence"},
     "dream": {"window_hours"},
 }
 
@@ -111,6 +117,9 @@ EXPECTED_REQUIRED_PROPERTIES = {
     "release": {"bucket_id"},
     "plan": {"content"},
     "letter_write": {"author", "content"},
+    # fork 定制工具
+    "passage": {"content"},
+    "etoile": {"content"},
 }
 
 

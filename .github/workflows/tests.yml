@@ -104,6 +104,9 @@ jobs:
       - name: Run 14-tool Docker MCP integration suite
         env:
           OMBRE_DOCKER_INTEGRATION_URL: http://127.0.0.1:18084/mcp
+          # 栈里起了可用的 stub LLM（ob-ci-llm），按测试文档声明 provider 可用，
+          # grow 走「成功拆分」分支而非「无 key 报 OB-E004」分支
+          OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER: "1"
         run: >-
           python -m pytest tests/test_mcp_tools_docker_integration.py -q
           --timeout=60
