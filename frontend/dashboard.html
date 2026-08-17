@@ -3503,7 +3503,7 @@
 
     <!-- Login form -->
     <div id="auth-login-form" style="display:none;">
-      <input type="password" id="auth-login-pwd" placeholder="输入访问密码 / Enter access password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:12px;" onkeydown="if(event.key==='Enter')doLogin()" />
+      <input type="password" id="auth-login-pwd" autocomplete="current-password" placeholder="输入访问密码 / Enter access password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:12px;" onkeydown="if(event.key==='Enter')doLogin()" />
       <button onclick="doLogin()" style="width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">登录 / Log in</button>
       <div style="margin-top:12px;text-align:center;">
         <a href="#" onclick="showRecovery();return false;" style="font-size:12px;color:var(--text-dim);text-decoration:none;border-bottom:1px dashed var(--border);">忘记密码 / Forgot password →</a>
@@ -3650,13 +3650,16 @@ async function doRecover() {
 }
 
 async function doLogin() {
-  const pwd = document.getElementById('auth-login-pwd').value;
+  // fork 修正：iOS Safari 钥匙串自动填充常带首尾空白，trim 掉避免"看着对却不匹配"
+  const pwd = document.getElementById('auth-login-pwd').value.trim();
   const resp = await fetch('/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
   if (resp.ok) {
     document.getElementById('auth-overlay').style.display = 'none';
   } else {
     const d = await resp.json().catch(() => ({}));
-    showAuthError(d.detail || '密码错误');
+    // fork 修正：后端错误字段是 error（限流/格式/密码错都在这里），
+    // 旧代码误读 detail → 永远 fallback 成"密码错误"，把 429 限流也伪装成密码问题
+    showAuthError(d.error || d.detail || '登录失败，请稍后重试');
   }
 }
 
@@ -3686,7 +3689,8 @@ async function changePassword() {
     document.getElementById('settings-new-pwd2').value = '';
   } else {
     const d = await resp.json().catch(() => ({}));
-    msgEl.style.color = 'var(--negative)'; msgEl.textContent = d.detail || '修改失败';
+    // fork 修正：同 doLogin，后端字段是 error 不是 detail
+    msgEl.style.color = 'var(--negative)'; msgEl.textContent = d.error || d.detail || '修改失败';
   }
 }
 
