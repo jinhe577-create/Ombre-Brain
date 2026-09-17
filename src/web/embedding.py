@@ -40,17 +40,19 @@ def _persist_embedding_yaml(updates: dict) -> None:
     """
     try:
         from utils import atomic_update_config_yaml
+    except ImportError:  # pragma: no cover - 包模式
+        from ..utils import atomic_update_config_yaml
 
-        def _mutate(save_config: dict) -> None:
-            sec = save_config.setdefault("embedding", {})
-            if not isinstance(sec, dict):
-                sec = {}
-                save_config["embedding"] = sec
-            sec.update(updates)
+    def _mutate(save_config: dict) -> None:
+        sec = save_config.setdefault("embedding", {})
+        if not isinstance(sec, dict):
+            sec = {}
+            save_config["embedding"] = sec
+        sec.update(updates)
 
-        atomic_update_config_yaml(_mutate)
-    except Exception as e:
-        logger.error(f"[migration] persist embedding to config.yaml failed: {e}")
+    # 写失败必须传播给迁移状态机。静默记录后返回会让已失败的配置发布被标记为
+    # completed，用户随后重启才发现仍在使用旧模型。
+    atomic_update_config_yaml(_mutate)
 
 
 _DEFAULT_OLLAMA_BASE = "http://ombre-ollama:11434"
@@ -296,7 +298,23 @@ async def _backfill_run() -> None:
         except Exception as exc:
             logger.warning("[backfill] could not list indexed ids: %s", exc)
             indexed_ids = set()
-        orphan_ids = sorted(indexed_ids - known_ids)
+        orphan_candidates = sorted(indexed_ids - known_ids)
+        orphan_ids: list[str] = []
+        for bucket_id in orphan_candidates:
+            try:
+                # ``all_buckets`` is only a snapshot. A concurrent hold may
+                # publish and index a new bucket after that scan; never delete
+                # its vector without confirming the Markdown is still absent.
+                if await sh.bucket_mgr.get(bucket_id) is not None:
+                    continue
+                orphan_ids.append(bucket_id)
+            except Exception as exc:
+                _backfill_state["cleanup_failed"] += 1
+                logger.warning(
+                    "[backfill] orphan confirmation failed for %s: %s",
+                    bucket_id,
+                    exc,
+                )
         _backfill_state["orphaned"] = len(orphan_ids)
         for bucket_id in orphan_ids:
             try:
@@ -375,6 +393,7 @@ def register(mcp) -> None:
         info: dict[str, object] = {
             "ok": True,
             "backend": getattr(sh.embedding_engine, "backend", ""),
+            "api_format": getattr(sh.embedding_engine, "api_format", ""),
             "enabled": bool(getattr(sh.embedding_engine, "enabled", False)),
             "model": backend_obj.model_name() if backend_obj else "",
             "vector_dim": backend_obj.vector_dim() if backend_obj else 0,
@@ -459,7 +478,7 @@ def register(mcp) -> None:
                 staging_db_path_for, reset_stale_migration_state, target_signature,
             )
         except ImportError:
-            from .migration_engine import (  # type: ignore
+            from ..migration_engine import (  # type: ignore
                 MigrationConfig, start_migration,
                 status_path_for as _mig_status_path_for,
                 staging_db_path_for, reset_stale_migration_state, target_signature,
@@ -474,7 +493,10 @@ def register(mcp) -> None:
             target_emb_cfg["api_format"] = req_api_format
         if body.get("api_key"):
             target_emb_cfg["api_key"] = str(body["api_key"]).strip()
-        if body.get("base_url"):
+        # Field presence and truthiness are different here: switching from a
+        # cloud provider to Ollama deliberately sends an empty base_url so the
+        # old cloud endpoint is cleared and the local default can take over.
+        if "base_url" in body:
             target_emb_cfg["base_url"] = str(body["base_url"]).strip()
         if body.get("model"):
             target_emb_cfg["model"] = str(body["model"]).strip()
@@ -603,7 +625,7 @@ def register(mcp) -> None:
                 if body.get("api_key"):
                     cfg_emb["api_key"] = str(body["api_key"]).strip()
                     _yaml_updates["api_key"] = str(body["api_key"]).strip()
-                if body.get("base_url"):
+                if "base_url" in body:
                     cfg_emb["base_url"] = str(body["base_url"]).strip()
                     _yaml_updates["base_url"] = str(body["base_url"]).strip()
                 if body.get("model"):
@@ -613,6 +635,7 @@ def register(mcp) -> None:
                 logger.info(f"[migration] sh.embedding_engine swapped to backend={target_backend} format={req_api_format or '(unchanged)'}; persisted to config.yaml")
             except Exception as e:
                 logger.error(f"[migration] post-swap failed: {e}")
+                raise
             finally:
                 _restart_outbox()
 
@@ -662,7 +685,7 @@ def register(mcp) -> None:
                 is_running,
             )
         except ImportError:
-            from .migration_engine import (  # type: ignore
+            from ..migration_engine import (  # type: ignore
                 status_path_for as _mig_status_path_for,
                 read_status as _mig_read_status,
                 is_running,
@@ -703,7 +726,7 @@ def register(mcp) -> None:
             from migration_engine import is_running as _mig_running  # type: ignore
         except ImportError:
             try:
-                from .migration_engine import is_running as _mig_running  # type: ignore
+                from ..migration_engine import is_running as _mig_running  # type: ignore
             except Exception:
                 _mig_running = lambda: False  # noqa: E731
         if _mig_running():

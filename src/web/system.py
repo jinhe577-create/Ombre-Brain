@@ -15,6 +15,7 @@ import ast
 import asyncio
 import json
 import os
+import tempfile
 import time
 from typing import Any
 
@@ -25,7 +26,6 @@ from starlette.responses import Response
 
 from . import _shared as sh
 
-from ombrebrain.app.legacy_runtime import LegacyRuntime
 from ombrebrain.architecture import (
     ADRDocument,
     ADRRequirementsContract,
@@ -34,19 +34,17 @@ from ombrebrain.architecture import (
     CodeArtifactSpec,
     HighestDifficultyCodeStandards,
 )
-from ombrebrain.cluster.replication import ReplicationContract, ReplicationSegment, ReplicationTopology
 from ombrebrain.maintenance import (
     MigrationPhasePlan,
     MigrationPreservationContract,
     MigrationTraceRecord,
-    VNextPreflightReportBuilder,
 )
 from ombrebrain.observability import ObservabilityMetricBoundary
 from ombrebrain.policy import RedLineContract, RedLineFeatureSpec, SurfaceDecision
 from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec
 from ombrebrain.resilience import CrashRecoveryContract, CrashRecoveryPlan, PathStep
 from ombrebrain.retrieval import SurfaceContextCompiler
-from deployment_profile import effective_configuration_report
+from ombrebrain.security.deployment_profile import effective_configuration_report
 from utils import config_file_path
 
 try:
@@ -59,10 +57,8 @@ try:
 except ImportError:  # pragma: no cover
     from ..utils import parse_bool  # type: ignore
 
-try:
-    from vault_health import inspect_vault  # type: ignore
-except ImportError:  # pragma: no cover
-    from ..vault_health import inspect_vault  # type: ignore
+from ombrebrain.observability import process_memory
+from ombrebrain.storage.vault_health import inspect_vault
 
 _LOGS_DEFAULT_LIMIT = 200
 _LOGS_MAX_LIMIT = 2000
@@ -157,19 +153,30 @@ def _probe_writable_dir(path: str) -> tuple[bool, str]:
         return False, "buckets_dir 未配置"
     if not os.path.isdir(path):
         return False, "目录不存在"
-    probe = os.path.join(path, ".ombre_diagnostics_probe")
+    probe = ""
+    fd = -1
     try:
-        with open(probe, "w", encoding="utf-8") as f:
+        fd, probe = tempfile.mkstemp(prefix=".ombre_diagnostics_probe_", dir=path)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle as f:
             f.write("ok")
-        os.remove(probe)
         return True, ""
     except Exception as e:
-        try:
-            if os.path.exists(probe):
-                os.remove(probe)
-        except Exception:
-            pass
         return False, str(e)
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            if probe:
+                os.remove(probe)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def _build_diagnostics_observability_metrics(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -261,7 +268,7 @@ def _is_public_mcp_tool_decorator(decorator: ast.expr) -> bool:
     func = call.func if call is not None else decorator
     if not isinstance(func, ast.Attribute) or func.attr != "tool":
         return False
-    return isinstance(func.value, ast.Name) and func.value.id in {"mcp", "mcp_extra"}
+    return isinstance(func.value, ast.Name) and func.value.id == "mcp"
 
 
 def _read_adr_documents_from_repo(repo_root: str) -> dict[str, Any]:
@@ -421,40 +428,6 @@ def _build_crash_recovery_diagnostics() -> dict[str, Any]:
     }
 
 
-def _build_replication_contract_diagnostics() -> dict[str, Any]:
-    contract = ReplicationContract.default()
-    decisions = [
-        {
-            "decision_name": "topology",
-            **contract.evaluate_topology(
-                ReplicationTopology(
-                    canonical_writers=("leader",),
-                    projection_readers=("reader-a", "reader-b"),
-                    encrypted_replicas=("reader-b",),
-                    segment_mode="snapshot_append_only",
-                )
-            ).to_dict(),
-        },
-        {
-            "decision_name": "segment",
-            **contract.evaluate_segment(
-                ReplicationSegment(
-                    replica_id="replica-a",
-                    events=[
-                        {"event_type": "TraceCreated", "trace_id": "t1", "trace_kind": "dynamic"},
-                        {"event_type": "TraceDeletedToArchive", "trace_id": "t1", "payload": {"tombstone": True}},
-                    ],
-                )
-            ).to_dict(),
-        },
-    ]
-    return {
-        "ok": all(decision.get("ok") for decision in decisions),
-        "decision_count": len(decisions),
-        "decisions": decisions,
-    }
-
-
 def _build_migration_preservation_diagnostics() -> dict[str, Any]:
     source = [
         MigrationTraceRecord(
@@ -537,94 +510,6 @@ def _build_surface_context_diagnostics() -> dict[str, Any]:
     }
 
 
-def _build_preflight_cli_diagnostics(repo_root: str) -> dict[str, Any]:
-    root = str(repo_root or "")
-    cli_path = os.path.join(root, "tools", "vnext_preflight.py")
-    diagnostics_path = os.path.join(root, "src", "web", "system.py")
-    required_files = (cli_path, diagnostics_path)
-    missing_files = [_rel_path(path, root) for path in required_files if not os.path.isfile(path)]
-
-    cli_text = _read_text_file(cli_path) if os.path.isfile(cli_path) else ""
-    diagnostics_text = _read_text_file(diagnostics_path) if os.path.isfile(diagnostics_path) else ""
-    required_cli_snippets = (
-        "def build_parser",
-        "--buckets-dir",
-        "--output",
-        "--coverage-only",
-        "LegacyRuntime.from_config",
-        "VNextPreflightReportBuilder(runtime).build()",
-    )
-    required_diagnostics_snippets = (
-        "vnext_preflight",
-        "VNextPreflightReportBuilder(runtime).build()",
-        "Run tools/vnext_preflight.py",
-    )
-    missing_cli_snippets = [snippet for snippet in required_cli_snippets if snippet not in cli_text]
-    missing_diagnostics_snippets = [
-        snippet for snippet in required_diagnostics_snippets if snippet not in diagnostics_text
-    ]
-    ok = not missing_files and not missing_cli_snippets and not missing_diagnostics_snippets
-    return {
-        "ok": ok,
-        "status": "ok" if ok else "error",
-        "cli_path": _rel_path(cli_path, root),
-        "diagnostics_path": _rel_path(diagnostics_path, root),
-        "missing_files": missing_files,
-        "missing_cli_snippets": missing_cli_snippets,
-        "missing_diagnostics_snippets": missing_diagnostics_snippets,
-    }
-
-
-def _build_preflight_report_self_diagnostics(vnext_preflight: dict[str, Any]) -> dict[str, Any]:
-    checks = vnext_preflight.get("checks") if isinstance(vnext_preflight.get("checks"), dict) else {}
-    self_check = checks.get("preflight_report_self") if isinstance(checks, dict) else None
-    if not isinstance(self_check, dict):
-        return {
-            "ok": False,
-            "status": "error",
-            "schema": vnext_preflight.get("schema", ""),
-            "missing_self_check": True,
-            "available_checks": sorted(str(name) for name in checks),
-        }
-
-    data = dict(self_check)
-    data["missing_self_check"] = False
-    data["top_level_schema"] = vnext_preflight.get("schema", "")
-    data["top_level_check_count"] = vnext_preflight.get("check_count", 0)
-    return data
-
-
-def _build_vnext_coverage_diagnostics(vnext_preflight: dict[str, Any]) -> dict[str, Any]:
-    checks = vnext_preflight.get("checks") if isinstance(vnext_preflight.get("checks"), dict) else {}
-    coverage = checks.get("vnext_coverage") if isinstance(checks, dict) else None
-    if not isinstance(coverage, dict):
-        return {
-            "ok": False,
-            "status": "error",
-            "schema": "",
-            "missing_coverage_check": True,
-            "available_checks": sorted(str(name) for name in checks),
-        }
-
-    data = dict(coverage)
-    data["missing_coverage_check"] = False
-    data["top_level_schema"] = vnext_preflight.get("schema", "")
-    data["top_level_check_count"] = vnext_preflight.get("check_count", 0)
-    return data
-
-
-def _read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def _rel_path(path: str, root: str) -> str:
-    try:
-        return os.path.relpath(path, root) if root else path
-    except ValueError:
-        return path
-
-
 def _read_persisted_runtime_config() -> tuple[str, dict[str, Any]]:
     """读取未应用环境覆盖的 config.yaml，供“已保存/实际生效”对照。"""
     path = config_file_path()
@@ -692,14 +577,34 @@ async def build_system_diagnostics() -> dict[str, Any]:
             cfg,
             persisted_cfg,
             environment=os.environ,
+            in_docker=sh.in_docker(),
             config_path=persisted_path,
             persistence=persistence,
         )
         effective_auth = bool(effective_report["effective"]["mcp_require_auth"])
+        network_security = effective_report.get("mcp_network_security") or {}
         profile = str(effective_report.get("profile") or "unconfigured")
         overrides = effective_report.get("overrides") or []
         manual_auth_configured = bool(effective_report.get("manual_auth_configured"))
-        if profile == "public_secure" and not effective_auth:
+        if network_security.get("override_active"):
+            config_status = "error"
+            config_message = "高危：已显式允许在非回环或未知边界关闭 MCP 鉴权"
+            config_action = (
+                "在部署平台删除/修正 OMBRE_MCP_REQUIRE_AUTH=false，并删除 "
+                "OMBRE_ALLOW_INSECURE_MCP，然后改用 OAuth 或静态 Token"
+                if network_security.get("auth_environment_override")
+                else "删除 OMBRE_ALLOW_INSECURE_MCP，并改用 OAuth 或静态 Token"
+            )
+        elif network_security.get("guard_active"):
+            config_status = "warning"
+            config_message = "已拦截不安全的免鉴权配置，当前进程已强制开启 MCP 鉴权"
+            config_action = (
+                "在部署平台删除/修正 OMBRE_MCP_REQUIRE_AUTH=false 后重建/重启；"
+                "仅在 Dashboard 重复保存不会覆盖平台环境变量"
+                if network_security.get("auth_environment_override")
+                else "开启并保存 OAuth/静态 Token，或把网络边界明确限制到本机回环"
+            )
+        elif profile == "public_secure" and not effective_auth:
             config_status = "error"
             config_message = "公网安全模式的实际 OAuth 已关闭，当前配置不安全"
             config_action = "删除/修正 OMBRE_MCP_REQUIRE_AUTH，或重新运行安全部署向导"
@@ -772,7 +677,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
     ledger_reporter = getattr(sh.bucket_mgr, "ledger_integrity_report", None)
     if callable(ledger_reporter):
         try:
-            ledger_report = ledger_reporter()
+            ledger_report = await asyncio.to_thread(ledger_reporter)
             invalid_lines = ledger_report.get("invalid_lines", []) or []
             checks.append(_check(
                 "ledger",
@@ -1012,29 +917,6 @@ async def build_system_diagnostics() -> dict[str, Any]:
         ))
 
     try:
-        replication_report = _build_replication_contract_diagnostics()
-        checks.append(_check(
-            "replication_contract",
-            "Replication Contract",
-            "ok" if replication_report.get("ok") else "error",
-            (
-                "Replication contract preserves single-writer trace/tombstone boundaries"
-                if replication_report.get("ok")
-                else "Replication contract violations found"
-            ),
-            details=replication_report,
-            action="" if replication_report.get("ok") else "Inspect replication contract decision violations",
-        ))
-    except Exception as e:
-        checks.append(_check(
-            "replication_contract",
-            "Replication Contract",
-            "warning",
-            f"Replication contract check could not run: {e}",
-            action="Inspect replication diagnostics contract inputs",
-        ))
-
-    try:
         migration_report = _build_migration_preservation_diagnostics()
         checks.append(_check(
             "migration_preservation",
@@ -1078,112 +960,6 @@ async def build_system_diagnostics() -> dict[str, Any]:
             "warning",
             f"Surface context check could not run: {e}",
             action="Inspect surface context diagnostics inputs",
-        ))
-
-    try:
-        preflight_cli_report = _build_preflight_cli_diagnostics(sh.repo_root)
-        checks.append(_check(
-            "preflight_cli_diagnostics",
-            "Preflight CLI",
-            "ok" if preflight_cli_report.get("ok") else "error",
-            (
-                "vNext preflight CLI and Dashboard hook are present"
-                if preflight_cli_report.get("ok")
-                else "vNext preflight CLI or Dashboard hook is incomplete"
-            ),
-            details=preflight_cli_report,
-            action="" if preflight_cli_report.get("ok") else "Inspect tools/vnext_preflight.py and src/web/system.py",
-        ))
-    except Exception as e:
-        checks.append(_check(
-            "preflight_cli_diagnostics",
-            "Preflight CLI",
-            "warning",
-            f"Preflight CLI diagnostics check could not run: {e}",
-            action="Inspect preflight CLI diagnostics inputs",
-        ))
-
-    try:
-        if buckets_dir:
-            runtime = LegacyRuntime.from_config({"buckets_dir": buckets_dir, "policy": cfg.get("policy", {})})
-            vnext_preflight = VNextPreflightReportBuilder(runtime).build()
-            checks.append(_check(
-                "vnext_preflight",
-                "vNext Preflight",
-                "ok" if vnext_preflight.get("ok") else "error",
-                "vNext preflight contracts are healthy" if vnext_preflight.get("ok") else "vNext preflight found contract violations",
-                details=vnext_preflight,
-                action="" if vnext_preflight.get("ok") else "Run tools/vnext_preflight.py and inspect failed checks",
-            ))
-            preflight_self_report = _build_preflight_report_self_diagnostics(vnext_preflight)
-            checks.append(_check(
-                "preflight_report_self",
-                "Preflight Self",
-                "ok" if preflight_self_report.get("ok") else "error",
-                (
-                    "vNext preflight report includes required checks"
-                    if preflight_self_report.get("ok")
-                    else "vNext preflight report is missing required checks"
-                ),
-                details=preflight_self_report,
-                action="" if preflight_self_report.get("ok") else "Inspect VNextPreflightReportBuilder required checks",
-            ))
-            vnext_coverage_report = _build_vnext_coverage_diagnostics(vnext_preflight)
-            checks.append(_check(
-                "vnext_coverage",
-                "vNext Coverage",
-                "ok" if vnext_coverage_report.get("ok") else "error",
-                (
-                    "vNext local phase coverage matrix has no preflight gaps"
-                    if vnext_coverage_report.get("ok") and not vnext_coverage_report.get("preflight_gap_count")
-                    else "vNext local phase coverage matrix needs attention"
-                ),
-                details=vnext_coverage_report,
-                action="" if vnext_coverage_report.get("ok") else "Inspect vNext coverage matrix output",
-            ))
-        else:
-            checks.append(_check(
-                "vnext_preflight",
-                "vNext Preflight",
-                "warning",
-                "vNext preflight skipped because buckets_dir is not configured",
-                action="Configure buckets_dir / OMBRE_VAULT_DIR first",
-            ))
-            checks.append(_check(
-                "preflight_report_self",
-                "Preflight Self",
-                "warning",
-                "Preflight self-check skipped because vNext preflight did not run",
-                action="Configure buckets_dir / OMBRE_VAULT_DIR first",
-            ))
-            checks.append(_check(
-                "vnext_coverage",
-                "vNext Coverage",
-                "warning",
-                "vNext coverage skipped because vNext preflight did not run",
-                action="Configure buckets_dir / OMBRE_VAULT_DIR first",
-            ))
-    except Exception as e:
-        checks.append(_check(
-            "vnext_preflight",
-            "vNext Preflight",
-            "warning",
-            f"vNext preflight could not run: {e}",
-            action="Run tools/vnext_preflight.py locally and inspect the traceback",
-        ))
-        checks.append(_check(
-            "preflight_report_self",
-            "Preflight Self",
-            "warning",
-            f"Preflight self-check could not run because vNext preflight failed: {e}",
-            action="Run tools/vnext_preflight.py locally and inspect the traceback",
-        ))
-        checks.append(_check(
-            "vnext_coverage",
-            "vNext Coverage",
-            "warning",
-            f"vNext coverage could not run because vNext preflight failed: {e}",
-            action="Run tools/vnext_preflight.py locally and inspect the traceback",
         ))
 
     dehy = cfg.get("dehydration", {}) or {}
@@ -1416,18 +1192,18 @@ async def build_system_diagnostics() -> dict[str, Any]:
     elif not mcp_oauth_required:
         auth_status = "error" if tunnel_public_risk else "warning"
         auth_message = (
-            "高危：隧道已配置为自动连接，但 MCP OAuth 已关闭；公网访问者可匿名读写全部记忆"
+            "高危：隧道已配置为自动连接，但 MCP 鉴权已关闭；公网访问者可匿名读写全部记忆"
             if tunnel_public_risk
-            else "MCP OAuth 已关闭：任何能访问 /mcp 的人都可以匿名读写全部记忆"
+            else "MCP 鉴权已关闭：任何能访问 /mcp 的人都可以匿名读写全部记忆"
         )
         auth_action = (
-            "立即开启 MCP OAuth 或关闭隧道自动连接"
+            "立即开启 MCP 鉴权或关闭隧道自动连接"
             if tunnel_public_risk
-            else "公网部署请开启 OAuth；仅在可信本机/内网或已有反代鉴权时关闭"
+            else "仅在已确认的本机回环，或已有独立鉴权并显式承担风险时关闭"
         )
     else:
         auth_status = "ok"
-        auth_message = "Dashboard 密码已设置，MCP OAuth 已开启"
+        auth_message = "Dashboard 密码已设置，MCP 鉴权已开启"
         auth_action = ""
     checks.append(_check(
         "auth",
@@ -1462,6 +1238,101 @@ async def build_system_diagnostics() -> dict[str, Any]:
         action="如长期停止，请重启服务并查看日志" if not decay_running else "",
     ))
 
+    # 核心准则每次对话无条件全量注入，但它和 breath 的 token 预算是两个独立
+    # 配置，谁也不知道对方。准则一多、一长，就会有几条静静地装不下——而使用者
+    # 感知到的只是「它今天怎么什么都没想起来」，不会想到去查 breath_max_tokens。
+    # 这个检查把那条看不见的线画出来。
+    try:
+        pinned_report = await _pinned_budget_report()
+    except Exception as exc:
+        checks.append(_check(
+            "pinned_token_budget",
+            "核心准则预算",
+            "warning",
+            f"无法核对核心准则的 token 预算：{type(exc).__name__}",
+        ))
+    else:
+        required = pinned_report["required_tokens"]
+        limit = pinned_report["limit_tokens"]
+        count = pinned_report["pinned_count"]
+        if not count:
+            status, message, action = "ok", "没有核心准则，不占预算", ""
+        elif required > limit:
+            status = "error"
+            message = (
+                f"{count} 条核心准则需要约 {required} token，"
+                f"超过 breath_max_tokens={limit}，会有准则返回不出来"
+            )
+            action = "调高 surfacing.breath_max_tokens，或精简/取消部分核心准则"
+        elif required > limit * 0.8:
+            status = "warning"
+            message = (
+                f"{count} 条核心准则已占用约 {required}/{limit} token，"
+                "再加或再长就会有准则返回不出来"
+            )
+            action = "考虑调高 surfacing.breath_max_tokens"
+        else:
+            status = "ok"
+            message = f"{count} 条核心准则约占 {required}/{limit} token"
+            action = ""
+        checks.append(_check(
+            "pinned_token_budget",
+            "核心准则预算",
+            status,
+            message,
+            details=pinned_report,
+            action=action,
+        ))
+
+    # 内存读数。上游报过 Render 512MB 上 OOM，而报告里只有「持续增长」——
+    # 没有 RSS、没有上限确认，照着那种描述改代码就是猜。把读数摆进诊断页，
+    # 下一次报告才带得上真实测量。容器上限走 cgroup 而不是 /proc/meminfo：
+    # 容器里后者报的是宿主机内存，照它算会得出「用了 2%」而进程正在被杀。
+    memory = process_memory.snapshot()
+    if not memory.get("available"):
+        checks.append(_check(
+            "process_memory",
+            "进程内存",
+            "ok",
+            "这个平台读不到进程内存（只有 Linux 有 /proc/self/status）",
+            details=memory,
+        ))
+    else:
+        used = memory.get("used_percent")
+        if used is None:
+            memory_status = "ok"
+            memory_msg = f"常驻内存 {memory['rss_mb']} MB；没有检测到容器内存上限"
+            memory_action = ""
+        elif used >= 90:
+            memory_status = "error"
+            memory_msg = (
+                f"常驻内存 {memory['rss_mb']} MB / 上限 {memory['limit_mb']} MB"
+                f"（{used}%）——随时可能被 OOM 杀掉"
+            )
+            memory_action = "把这一段贴进 issue；同时考虑调大实例内存"
+        elif used >= 75:
+            memory_status = "warning"
+            memory_msg = (
+                f"常驻内存 {memory['rss_mb']} MB / 上限 {memory['limit_mb']} MB"
+                f"（{used}%）"
+            )
+            memory_action = "留意是否持续上涨；报问题时带上这一段"
+        else:
+            memory_status = "ok"
+            memory_msg = (
+                f"常驻内存 {memory['rss_mb']} MB / 上限 {memory['limit_mb']} MB"
+                f"（{used}%）"
+            )
+            memory_action = ""
+        checks.append(_check(
+            "process_memory",
+            "进程内存",
+            memory_status,
+            memory_msg,
+            details=memory,
+            action=memory_action,
+        ))
+
     summary = {"ok": 0, "warning": 0, "error": 0}
     for item in checks:
         status = item.get("status")
@@ -1471,6 +1342,36 @@ async def build_system_diagnostics() -> dict[str, Any]:
         "ok": summary["error"] == 0,
         "summary": summary,
         "checks": checks,
+    }
+
+
+async def _pinned_budget_report() -> dict[str, Any]:
+    """量一下核心准则渲染出来要多少 token，和 breath 的预算比一比。"""
+    from tools.breath._verbatim import render_stored_bucket
+
+    surfacing = sh.config.get("surfacing", {}) or {}
+    limit = int(surfacing.get("breath_max_tokens") or 20000)
+    buckets = await sh.bucket_mgr.list_all()
+    pinned = [b for b in buckets if (b.get("metadata") or {}).get("pinned")]
+    required = 0
+    largest = 0
+    for bucket in pinned:
+        try:
+            _, cost = render_stored_bucket(
+                bucket, f"📌 [核心准则] [bucket_id:{bucket['id']}]", ""
+            )
+        except Exception:
+            continue
+        required += cost
+        largest = max(largest, cost)
+    return {
+        "pinned_count": len(pinned),
+        "required_tokens": required,
+        "limit_tokens": limit,
+        "largest_entry_tokens": largest,
+        "max_pinned": int(
+            (sh.config.get("limits", {}) or {}).get("max_pinned") or 20
+        ),
     }
 
 

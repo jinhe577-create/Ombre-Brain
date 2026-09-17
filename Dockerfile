@@ -23,9 +23,10 @@ WORKDIR /app
 # 不需要 Tunnel 的用户可 `docker build --build-arg INSTALL_CLOUDFLARED=0 ...` 完全跳过。
 ARG INSTALL_CLOUDFLARED=1
 COPY deploy/fetch_cloudflared.py /tmp/fetch_cloudflared.py
-RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
-        python /tmp/fetch_cloudflared.py /usr/local/bin/cloudflared \
-        && chmod +x /usr/local/bin/cloudflared; \
+RUN set -eu; \
+    if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
+        python /tmp/fetch_cloudflared.py /usr/local/bin/cloudflared; \
+        chmod +x /usr/local/bin/cloudflared; \
     else \
         echo "[build] INSTALL_CLOUDFLARED=0 → 跳过 cloudflared（Tunnel 一键管理将不可用）"; \
     fi; \
@@ -38,7 +39,9 @@ RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
 # 默认留空 → 官方 PyPI，行为不变。
 ARG PIP_INDEX_URL=""
 ARG PIP_TRUSTED_HOST=""
-COPY requirements.txt requirements.lock.txt ./
+# GitHub 源码归档会排除开发者使用的宽松 requirements.txt；镜像安装只依赖
+# 带 hash 的权威生产锁，因此 clone 与归档构建统一只复制该文件。
+COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir --retries 10 --timeout 120 \
         ${PIP_INDEX_URL:+-i "$PIP_INDEX_URL"} \
         ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} \
@@ -49,14 +52,6 @@ COPY src/ ./src/
 COPY frontend/ ./frontend/
 COPY VERSION ./VERSION
 COPY config.example.yaml ./config.default.yaml
-# fork 修正：容器种子配置与镜像运行时对齐，否则 Dashboard 永远显示
-# 「已保存 stdio / 生效 streamable-http」这类假漂移，/api/transport 也会把
-# 同值保存误判为需要重启（Docker 集成测试即验证此契约）：
-# - transport 固定为容器实际使用的 streamable-http（ENV OMBRE_TRANSPORT）
-# - mcp_require_auth / mcp_auth_mode 从种子中移除：未持久化时跟随运行时
-#   （env 或内置默认 true），安全默认不变，但 env 显式关闭时不再被种子顶回
-RUN sed -i 's/^transport: .*/transport: "streamable-http"/' ./config.default.yaml \
-    && sed -i '/^mcp_require_auth: /d; /^mcp_auth_mode: /d' ./config.default.yaml
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
@@ -65,6 +60,12 @@ RUN chmod +x ./entrypoint.sh
 # 出现「服务装完了但模型没拿到使用约定」的 onboarding 断点。内部设计稿
 # （docs/superpowers、docs/secrets 等）不在此列，仍被 .dockerignore 挡在外面。
 COPY docs/CLAUDE_PROMPT.md docs/ENVIRONMENT_VARIABLES.md docs/INTERNALS.md docs/MULTI_OWNER.md docs/OPERATIONS.md ./docs/
+# ADR 与 preflight CLI：两项系统诊断（adr_requirements / preflight_cli_diagnostics）
+# 在运行时目录下分别读 docs/adr/ 与 tools/vnext_preflight.py。镜像此前不含这两处，
+# 诊断在任何 Docker 部署上都报 not found / missing_files。
+COPY docs/adr/ ./docs/adr/
+COPY tools/ ./tools/
+COPY kernel/ ./kernel/
 COPY README.md ./README.md
 COPY CHANGELOG.md ./CHANGELOG.md
 

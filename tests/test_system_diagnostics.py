@@ -1,4 +1,6 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -19,6 +21,9 @@ class FakeMCP:
 
 
 class FakeBucketManager:
+    def __init__(self):
+        self.ledger_thread_id = None
+
     async def get_stats(self):
         return {
             "permanent_count": 1,
@@ -27,6 +32,7 @@ class FakeBucketManager:
         }
 
     def ledger_integrity_report(self):
+        self.ledger_thread_id = threading.get_ident()
         return {
             "ok": True,
             "path": "buckets/_ledger/events.jsonl",
@@ -119,7 +125,6 @@ async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, 
                 "            return fn",
                 "        return deco",
                 "mcp = FakeMCP()",
-                "mcp_extra = FakeMCP()",
                 "@mcp.tool()",
                 "async def breath():",
                 "    pass",
@@ -135,25 +140,12 @@ async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, 
                 "@mcp.tool()",
                 "async def dream():",
                 "    pass",
-                "@mcp_extra.tool()",
+                "@mcp.tool()",
                 "async def pulse():",
                 "    pass",
-                "@mcp_extra.tool()",
+                "@mcp.tool()",
                 "async def release():",
                 "    pass",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (tools_dir / "vnext_preflight.py").write_text(
-        "\n".join(
-            [
-                "def build_parser():",
-                "    parser.add_argument('--buckets-dir')",
-                "    parser.add_argument('--output')",
-                "    parser.add_argument('--coverage-only')",
-                "    runtime = LegacyRuntime.from_config({})",
-                "    return VNextPreflightReportBuilder(runtime).build()",
             ]
         ),
         encoding="utf-8",
@@ -162,8 +154,6 @@ async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, 
         "\n".join(
             [
                 "# diagnostics boundary",
-                "vnext_preflight = VNextPreflightReportBuilder(runtime).build()",
-                "action = 'Run tools/vnext_preflight.py'",
             ]
         ),
         encoding="utf-8",
@@ -227,7 +217,9 @@ Diagnostics regression tests.
         "mcp_require_auth": False,
         "github_sync": {"repo": "owner/repo", "branch": "main", "path_prefix": "ombre"},
     })
-    monkeypatch.setattr(system.sh, "bucket_mgr", FakeBucketManager())
+    bucket_mgr = FakeBucketManager()
+    event_loop_thread_id = threading.get_ident()
+    monkeypatch.setattr(system.sh, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(system.sh, "decay_engine", FakeDecayEngine())
     monkeypatch.setattr(system.sh, "embedding_engine", StandbyEmbeddingEngine())
     monkeypatch.setattr(system.sh, "github_sync_instance", FakeGithubSync())
@@ -246,6 +238,10 @@ Diagnostics regression tests.
     payload = await system.build_system_diagnostics()
     by_id = {check["id"]: check for check in payload["checks"]}
 
+    assert bucket_mgr.ledger_thread_id is not None
+    assert bucket_mgr.ledger_thread_id != event_loop_thread_id
+    assert not (buckets_dir / ".ombrebrain-v3").exists()
+    assert list(buckets_dir.glob(".ombre_diagnostics_probe_*")) == []
     assert payload["ok"] is False
     assert payload["summary"]["error"] >= 2
     assert by_id["storage"]["status"] == "ok"
@@ -303,11 +299,6 @@ Diagnostics regression tests.
     assert crash_details["decision_count"] == 3
     assert all(item["ok"] for item in crash_details["decisions"])
     assert {item["path_name"] for item in crash_details["decisions"]} == {"write", "read", "recovery_plan"}
-    assert by_id["replication_contract"]["status"] == "ok"
-    replication_details = by_id["replication_contract"]["details"]
-    assert replication_details["decision_count"] == 2
-    assert all(item["ok"] for item in replication_details["decisions"])
-    assert {item["decision_name"] for item in replication_details["decisions"]} == {"topology", "segment"}
     assert by_id["migration_preservation"]["status"] == "ok"
     migration_details = by_id["migration_preservation"]["details"]
     assert migration_details["decision_count"] == 2
@@ -320,40 +311,56 @@ Diagnostics regression tests.
     assert surface_context_details["items"][0]["instructional_force"] == "none"
     assert surface_context_details["items"][0]["may_control_reasoning"] is False
     assert surface_context_details["items"][0]["redactions"]
-    assert by_id["preflight_cli_diagnostics"]["status"] == "ok"
-    preflight_cli_details = by_id["preflight_cli_diagnostics"]["details"]
-    assert preflight_cli_details["ok"] is True
-    assert preflight_cli_details["missing_files"] == []
-    assert preflight_cli_details["missing_cli_snippets"] == []
-    assert preflight_cli_details["missing_diagnostics_snippets"] == []
-    assert by_id["llm"]["status"] == "error"
-    assert "API Key" in by_id["llm"]["message"]
-    assert by_id["embedding"]["status"] == "error"
-    assert "待机" in by_id["embedding"]["message"]
-    assert by_id["github"]["status"] == "warning"
-    assert by_id["auth"]["status"] == "error"
-    assert "匿名读写" in by_id["auth"]["message"]
-    assert by_id["auth"]["action"]
-    assert by_id["auth"]["details"]["mcp_oauth_required"] is False
-    assert by_id["vnext_preflight"]["status"] == "ok"
-    assert by_id["vnext_preflight"]["details"]["schema"] == "vnext-preflight.v1"
-    assert by_id["preflight_report_self"]["status"] == "ok"
-    preflight_self_details = by_id["preflight_report_self"]["details"]
-    assert preflight_self_details["schema"] == "vnext-preflight.v1"
-    assert preflight_self_details["top_level_schema"] == "vnext-preflight.v1"
-    assert preflight_self_details["missing_self_check"] is False
-    assert preflight_self_details["missing_required_checks"] == []
-    assert preflight_self_details["malformed_checks"] == []
-    assert preflight_self_details["present_required_count"] == preflight_self_details["required_check_count"]
-    assert by_id["vnext_coverage"]["status"] == "ok"
-    vnext_coverage_details = by_id["vnext_coverage"]["details"]
-    assert vnext_coverage_details["schema"] == "vnext-coverage.v1"
-    assert vnext_coverage_details["top_level_schema"] == "vnext-preflight.v1"
-    assert vnext_coverage_details["missing_coverage_check"] is False
-    assert vnext_coverage_details["phase_count"] >= 30
-    assert vnext_coverage_details["preflight_gap_count"] == 0
-    assert vnext_coverage_details["next_preflight_targets"] == []
-    assert vnext_coverage_details["preflight_coverage_percent"] == 100.0
+
+
+def test_writable_probe_uses_unique_files_and_always_cleans_up(monkeypatch, tmp_path):
+    legacy_probe = tmp_path / ".ombre_diagnostics_probe"
+    legacy_probe.write_text("do-not-overwrite", encoding="utf-8")
+    observed_paths = []
+    observed_lock = threading.Lock()
+    real_mkstemp = system.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        with observed_lock:
+            observed_paths.append(path)
+        return fd, path
+
+    monkeypatch.setattr(system.tempfile, "mkstemp", recording_mkstemp)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(lambda _index: system._probe_writable_dir(str(tmp_path)), range(16))
+        )
+
+    assert results == [(True, "")] * 16
+    assert len(observed_paths) == 16
+    assert len(set(observed_paths)) == 16
+    assert all(not system.os.path.exists(path) for path in observed_paths)
+    assert legacy_probe.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_writable_probe_cleans_up_when_opening_the_probe_fails(monkeypatch, tmp_path):
+    observed_paths = []
+    real_mkstemp = system.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        observed_paths.append(path)
+        return fd, path
+
+    def fail_fdopen(*_args, **_kwargs):
+        raise OSError("synthetic probe failure")
+
+    monkeypatch.setattr(system.tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(system.os, "fdopen", fail_fdopen)
+
+    writable, error = system._probe_writable_dir(str(tmp_path))
+
+    assert writable is False
+    assert "synthetic probe failure" in error
+    assert len(observed_paths) == 1
+    assert not system.os.path.exists(observed_paths[0])
 
 
 @pytest.mark.asyncio

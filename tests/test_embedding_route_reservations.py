@@ -7,6 +7,7 @@ import pytest
 
 import embedding_engine as embedding_engine_module
 import migration_engine
+import utils
 from web import embedding as embedding_web
 
 
@@ -45,6 +46,16 @@ def response_json(response):
     return json.loads(response.body.decode("utf-8"))
 
 
+def test_persist_embedding_yaml_propagates_atomic_write_failure(monkeypatch):
+    def fail_write(_mutate):
+        raise OSError("synthetic read-only config")
+
+    monkeypatch.setattr(utils, "atomic_update_config_yaml", fail_write)
+
+    with pytest.raises(OSError, match="synthetic read-only config"):
+        embedding_web._persist_embedding_yaml({"backend": "ollama", "enabled": True})
+
+
 @pytest.fixture(autouse=True)
 def reset_process_reservations():
     migration_engine.reset_for_test()
@@ -73,6 +84,8 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
     probe_entered = asyncio.Event()
     allow_probe = asyncio.Event()
     calls = {"construct": 0, "reset": 0, "stop": 0, "start": 0, "swap": 0}
+    constructed_configs = []
+    persisted_updates = []
 
     live_db = tmp_path / "embeddings.db"
     live_db.write_bytes(b"old-live")
@@ -93,6 +106,9 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
 
         def __init__(self, config):
             calls["construct"] += 1
+            constructed_configs.append(
+                json.loads(json.dumps(config["embedding"]))
+            )
             self.db_path = config["embedding"]["db_path"]
             self._backend = Backend()
 
@@ -139,7 +155,14 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
         "config",
         {
             "buckets_dir": str(buckets_dir),
-            "embedding": {"enabled": True, "backend": "api"},
+            "embedding": {
+                "enabled": True,
+                "backend": "api",
+                "api_key": "siliconflow-secret",
+                "api_format": "openai_compat",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "model": "BAAI/bge-m3",
+            },
         },
     )
     monkeypatch.setattr(
@@ -154,7 +177,11 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
         "replace_embedding_engine",
         lambda _engine: calls.__setitem__("swap", calls["swap"] + 1),
     )
-    monkeypatch.setattr(embedding_web, "_persist_embedding_yaml", lambda _updates: None)
+    monkeypatch.setattr(
+        embedding_web,
+        "_persist_embedding_yaml",
+        lambda updates: persisted_updates.append(dict(updates)),
+    )
     monkeypatch.setattr(embedding_engine_module, "EmbeddingEngine", TargetEngine)
     monkeypatch.setattr(migration_engine, "reset_stale_migration_state", fake_reset)
 
@@ -162,9 +189,20 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
     embedding_web.register(mcp)
     handler = mcp.routes[("POST", "/api/embedding/migrate")]
 
-    first_request = JsonRequest({"target_backend": "api", "api_key": "test"})
+    first_request = JsonRequest(
+        {
+            "target_backend": "ollama",
+            "api_format": "ollama",
+            "base_url": "",
+            "model": "bge-m3",
+        }
+    )
     first_task = asyncio.create_task(handler(first_request))
     await asyncio.wait_for(probe_entered.wait(), timeout=2)
+
+    assert constructed_configs[0]["api_format"] == "ollama"
+    assert constructed_configs[0]["base_url"] == ""
+    assert constructed_configs[0]["model"] == "bge-m3"
 
     losing_request = NeverReadRequest({"target_backend": "api"})
     losing_response = await handler(losing_request)
@@ -193,6 +231,12 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
     assert calls["stop"] == 1
     assert calls["start"] == 1
     assert calls["swap"] == 1
+    assert embedding_web.sh.config["embedding"]["base_url"] == ""
+    assert embedding_web.sh.config["embedding"]["api_format"] == "ollama"
+    assert embedding_web.sh.config["embedding"]["model"] == "bge-m3"
+    assert persisted_updates[-1]["base_url"] == ""
+    assert persisted_updates[-1]["api_format"] == "ollama"
+    assert persisted_updates[-1]["model"] == "bge-m3"
     assert migration_engine.is_running() is False
 
 
@@ -316,4 +360,3 @@ async def test_ollama_pull_reserves_before_body_and_connectivity_await(monkeypat
     assert embedding_web._ollama_pull_state["status"] == "success"
     assert embedding_web._ollama_pull_state["running"] is False
     assert embedding_web._ollama_pull_owner is None
-

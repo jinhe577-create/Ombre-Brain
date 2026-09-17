@@ -17,6 +17,7 @@ def _bucket(**metadata):
     [
         ({"dont_surface": True}, "dont_surface"),
         ({"anchor": True}, "anchor"),
+        ({"protected": True}, "protected"),
         ({"type": "feel"}, "private_type"),
         ({"type": "plan"}, "private_type"),
         ({"type": "letter"}, "private_type"),
@@ -44,6 +45,60 @@ def test_search_policy_keeps_dont_surface_reachable_by_explicit_query():
 
     assert decision.allowed
     assert decision.reasons == ()
+
+
+@pytest.mark.parametrize("digested", [True, "true"])
+@pytest.mark.parametrize(
+    ("mode", "allowed"),
+    [
+        ("spontaneous", False),
+        ("dream", False),
+        ("search", True),
+        ("importance", True),
+    ],
+)
+def test_digested_visibility_depends_on_explicit_or_passive_mode(
+    digested,
+    mode,
+    allowed,
+):
+    decision = SurfacePolicyVM.default().evaluate_bucket(
+        _bucket(digested=digested),
+        mode=mode,
+    )
+
+    assert decision.allowed is allowed
+    if allowed:
+        assert "digested" not in decision.reasons
+    else:
+        assert "digested" in decision.reasons
+
+
+@pytest.mark.parametrize("protected", [True, "true"])
+@pytest.mark.parametrize(
+    ("mode", "allowed"),
+    [
+        ("spontaneous", False),
+        ("dream", False),
+        ("search", True),
+        ("importance", True),
+    ],
+)
+def test_protected_visibility_depends_on_explicit_or_passive_mode(
+    protected,
+    mode,
+    allowed,
+):
+    decision = SurfacePolicyVM.default().evaluate_bucket(
+        _bucket(protected=protected),
+        mode=mode,
+    )
+
+    assert decision.allowed is allowed
+    if allowed:
+        assert "protected" not in decision.reasons
+    else:
+        assert decision.reasons == ("protected",)
 
 
 @pytest.mark.parametrize("mode", ["spontaneous", "search", "importance"])
@@ -104,6 +159,8 @@ class FakeBucketManager:
         return [
             _bucket(id="visible", importance=8),
             _bucket(id="hidden", importance=10, dont_surface=True),
+            _bucket(id="digested", importance=10, digested=True),
+            _bucket(id="protected", importance=10, protected="true"),
             _bucket(id="archived", importance=10, type="archived"),
         ]
 
@@ -120,6 +177,7 @@ class FakeSearchBucketManager:
         return [
             _bucket(id="visible", name="Visible", importance=8),
             _bucket(id="hidden", name="Hidden", importance=10, dont_surface=True),
+            _bucket(id="digested", name="Digested", importance=10, digested=True),
             _bucket(id="deleted", name="Deleted", deleted_at="2026-07-03T00:00:00+00:00"),
             _bucket(id="tombstone", name="Tombstone", tombstone=True),
             _bucket(id="archived", name="Archived", type="archived"),
@@ -152,7 +210,7 @@ async def test_dashboard_search_filters_terminal_states_but_keeps_dont_surface(m
     response = await mcp.routes[("GET", "/api/search")](FakeSearchRequest())
     payload = json.loads(response.body.decode("utf-8"))
 
-    assert [bucket["id"] for bucket in payload] == ["visible", "hidden"]
+    assert [bucket["id"] for bucket in payload] == ["visible", "hidden", "digested"]
     # 响应体形状不变（前端依赖 Array.isArray），语义检索状态走响应头。
     assert isinstance(payload, list)
 
