@@ -896,20 +896,26 @@ def _verify_password_for_rotation(password: str) -> CredentialProof | None:
     """Verify a password and return the exact credential/generation checked."""
     with _auth_mutation_lock:
         generation = _credential_generation
-        env_password = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")
+        env_password = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip()
+        stored = str(_read_auth_data_locked().get("password_hash", ""))
         if env_password:
-            stored = ""
             proof = CredentialProof(
                 "environment_password",
                 _environment_password_proof(env_password),
                 generation,
             )
         else:
-            stored = str(_read_auth_data_locked().get("password_hash", ""))
             proof = CredentialProof("password_hash", stored, generation)
 
     if env_password:
         verified = hmac.compare_digest(password, env_password)
+        if not verified and stored:
+            verified = _verify_secret(password, stored)
+            if verified:
+                with _auth_mutation_lock:
+                    proof = CredentialProof(
+                        "password_hash", stored, _credential_generation
+                    )
     else:
         verified = bool(stored) and _verify_secret(password, stored)
     if not verified:
@@ -1037,16 +1043,21 @@ def sync_env_password_to_file() -> None:
     a password the user changed via the dashboard.
     """
     env_pw = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip()
-    if not env_pw:
-        return
-    existing = _load_auth_data()
-    if existing.get("password_hash"):
-        return
-    try:
-        _save_password_hash(env_pw, advance_generation=False)
-        logger.info("[auth] 已将环境变量密码同步到 auth 文件（首次写入）")
-    except Exception as e:
-        logger.warning("[auth] 环境变量密码同步失败: %s", e)
+    has_file_hash = bool(_load_auth_data().get("password_hash"))
+    if env_pw:
+        logger.info("[auth] 密码来源: 环境变量 OMBRE_DASHBOARD_PASSWORD (长度 %d)", len(env_pw))
+        if has_file_hash:
+            logger.info("[auth] auth 文件已有密码 hash，环境变量仅用于验证（不覆盖）")
+        else:
+            try:
+                _save_password_hash(env_pw, advance_generation=False)
+                logger.info("[auth] 已将环境变量密码同步到 auth 文件（首次写入）")
+            except Exception as e:
+                logger.warning("[auth] 环境变量密码同步失败: %s", e)
+    elif has_file_hash:
+        logger.info("[auth] 密码来源: auth 文件 (持久盘)")
+    else:
+        logger.warning("[auth] 未配置任何密码（无环境变量，无 auth 文件）——首次访问将进入 setup 流程")
 
 
 def _is_setup_needed() -> bool:
