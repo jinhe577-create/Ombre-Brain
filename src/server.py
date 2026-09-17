@@ -372,8 +372,9 @@ _wsh.init_runtime(
 )
 # 启动时把磁盘上的会话装回内存（容器重启不踢登录）。鉴权/会话逻辑全在 web/_shared.py，
 # server.py 自身已无 @mcp.custom_route 路由，只需启动时载入一次会话。
-from web._shared import _load_sessions
+from web._shared import _load_sessions, sync_env_password_to_file
 _load_sessions()
+sync_env_password_to_file()
 
 # 注册所有 web/ 路由模块（HTTP 层已全部迁出，见 web/__init__.register_all）
 _web.register_all(mcp)

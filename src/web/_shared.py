@@ -1029,6 +1029,26 @@ def _verify_security_answer(answer: str) -> bool:
     return proof is not None and _credential_proof_matches(proof)
 
 
+def sync_env_password_to_file() -> None:
+    """If OMBRE_DASHBOARD_PASSWORD is set, ensure its hash exists in the auth
+    file so the password survives even if the env var is later removed.
+
+    Only writes when the auth file has no password_hash yet — never overwrites
+    a password the user changed via the dashboard.
+    """
+    env_pw = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip()
+    if not env_pw:
+        return
+    existing = _load_auth_data()
+    if existing.get("password_hash"):
+        return
+    try:
+        _save_password_hash(env_pw, advance_generation=False)
+        logger.info("[auth] 已将环境变量密码同步到 auth 文件（首次写入）")
+    except Exception as e:
+        logger.warning("[auth] 环境变量密码同步失败: %s", e)
+
+
 def _is_setup_needed() -> bool:
     """True if no password is configured (env var or file)."""
     if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
