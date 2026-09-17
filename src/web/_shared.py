@@ -47,6 +47,7 @@ from ombrebrain.app.execution import ExecutionEnvelope
 from ombrebrain.policy.update_policy import evaluate_update_manifest as _evaluate_update_manifest
 
 logger = logging.getLogger("ombre_brain")
+deletion_requests = None
 
 # --- 运行环境探测（Docker vs 裸机）---
 # 本地向量化要按宿主类型分流：Docker 里 ollama 是独立容器（连 ombre-ollama），
@@ -173,6 +174,10 @@ import_engine = None
 migrate_engine = None
 github_sync_instance = None
 v3_runtime = None
+you_service = None
+you_tool_gate = None
+them_service = None
+them_tool_gate = None
 
 
 def init(cfg: dict) -> None:
@@ -316,14 +321,9 @@ restart_github_auto_task = None # def(interval_minutes: int) -> None（起停后
 
 
 # --- 项目 .env 读写（config / env-config / host-vault 路由共用，故放共享层）---
-# fork 定制：路径解析统一走 utils.env_file_path（数据目录优先）。Render / Zeabur
-# 上仓库目录随部署重建，.env 落在持久盘（buckets 所在目录）才能活过重启。
+# 与原 server.py 行为一致：.env 落在 src/.env。本文件在 src/web/ 下，上两级即 src/。
 def _project_env_path() -> str:
-    try:
-        from utils import env_file_path  # type: ignore
-    except ImportError:  # pragma: no cover
-        from ..utils import env_file_path  # type: ignore
-    return env_file_path()
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 
 def _read_env_var(name: str) -> str:
@@ -743,17 +743,6 @@ def _load_sessions() -> None:
         logger.warning(f"[auth] failed to load sessions: {e}")
 
 
-def _save_sessions() -> None:
-    """Atomically persist active sessions or raise on a durability failure."""
-    try:
-        with _session_state_lock:
-            _persist_sessions_locked(_sessions)
-    except Exception as e:
-        if isinstance(e, AuthPersistenceError):
-            raise
-        raise AuthPersistenceError("failed to persist dashboard sessions") from e
-
-
 def _persist_sessions_locked(sessions: dict[str, float]) -> None:
     """Persist one candidate registry while ``_session_state_lock`` is held."""
     path = _get_sessions_file()
@@ -892,6 +881,15 @@ def _credential_proof_matches(
         return _credential_proof_matches_locked(proof, strict=strict)
 
 
+def _constant_time_text_equal(left: str, right: str) -> bool:
+    """以 UTF-8 摘要恒定时间比较任意 Unicode 文本。"""
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    left_digest = hashlib.sha256(left.encode("utf-8")).digest()
+    right_digest = hashlib.sha256(right.encode("utf-8")).digest()
+    return hmac.compare_digest(left_digest, right_digest)
+
+
 def _verify_password_for_rotation(password: str) -> CredentialProof | None:
     """Verify a password and return the exact credential/generation checked."""
     with _auth_mutation_lock:
@@ -908,7 +906,7 @@ def _verify_password_for_rotation(password: str) -> CredentialProof | None:
             proof = CredentialProof("password_hash", stored, generation)
 
     if env_password:
-        verified = hmac.compare_digest(password, env_password)
+        verified = _constant_time_text_equal(password, env_password)
         if not verified and stored:
             verified = _verify_secret(password, stored)
             if verified:
@@ -1036,12 +1034,7 @@ def _verify_security_answer(answer: str) -> bool:
 
 
 def sync_env_password_to_file() -> None:
-    """If OMBRE_DASHBOARD_PASSWORD is set, ensure its hash exists in the auth
-    file so the password survives even if the env var is later removed.
-
-    Only writes when the auth file has no password_hash yet — never overwrites
-    a password the user changed via the dashboard.
-    """
+    """Persist env var password to auth file so login survives env var removal."""
     env_pw = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip()
     has_file_hash = bool(_load_auth_data().get("password_hash"))
     if env_pw:

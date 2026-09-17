@@ -3,7 +3,8 @@
 migrate_engine.py — 完整记忆包导入引擎
 ========================================
 
-把 /api/export 产生的 zip 包（buckets/*.md + embeddings.db + export_meta.json）
+把 /api/export 产生的 zip 包（buckets/*.md + sources/* + embeddings.db +
+可选 you/you.sqlite3 + export_meta.json）
 以增量 merge 方式写入当前系统。
 
 关键行为：
@@ -31,6 +32,7 @@ migrate_engine.py — 完整记忆包导入引擎
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -49,22 +51,47 @@ from typing import Any, Optional
 
 import frontmatter
 
+from ombrebrain.storage.backup_archive import (
+    BackupArchiveError,
+    MIGRATE_MAX_SOURCE_BYTES,
+    extract_backup_archive_file,
+    validate_sqlite_bytes,
+    validate_sqlite_file,
+)
+from ombrebrain.storage.source_store import (
+    SOURCE_REF_RE,
+    SourceStore,
+    referenced_source_ids_from_metadata,
+)
+from ombrebrain.storage.relation_store import normalize_relation_links
+from ombrebrain.them.store import (
+    ThemStoreError,
+    validate_them_snapshot_bytes,
+    validate_them_snapshot_file,
+)
+from ombrebrain.you.store import (
+    YouStoreError,
+    validate_you_snapshot_bytes,
+    validate_you_snapshot_file,
+)
+from ombrebrain.storage.vector_codec import decode_vector, encode_vector
+
 try:
-    from backup_archive import (  # type: ignore
-        BackupArchiveError,
-        extract_backup_archive_file,
-        validate_sqlite_bytes,
-        validate_sqlite_file,
+    from utils import (  # type: ignore
+        _win_long_path,
+        now_iso,
+        publish_new_file,
+        safe_path,
+        sanitize_name,
     )
-    from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from .backup_archive import (  # type: ignore
-        BackupArchiveError,
-        extract_backup_archive_file,
-        validate_sqlite_bytes,
-        validate_sqlite_file,
+    from .utils import (  # type: ignore
+        _win_long_path,
+        now_iso,
+        publish_new_file,
+        safe_path,
+        sanitize_name,
     )
-    from .utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 
 logger = logging.getLogger("ombre_brain.migrate")
 
@@ -187,6 +214,30 @@ def _safe_unlink(path: str) -> None:
         logger.warning(f"[migrate] failed to clean up staged file {path}: {e}")
 
 
+def _is_same_file(left: str, right: str) -> bool:
+    """判断两个路径是不是同一个文件，兼容大小写不敏感的文件系统。
+
+    只做字符串比较在 macOS / Windows 上会漏判：桶渲染出的 `Memory_x.md` 与
+    磁盘上已有的 `memory_x.md` 落在同一个 inode 上，但 `os.path.normcase`
+    在 POSIX 上是恒等函数、不折叠大小写，于是覆盖导入会判成「不是同一个文件，
+    可目标又已存在」而直接抛 FileExistsError——旧记忆没归档、新内容没写进去，
+    功能在这两个平台上整个不可用（Linux 因为大小写敏感反而绕开了）。
+
+    先比字符串是为了覆盖目标尚不存在的正常新建路径（此时 samefile 必然抛错）；
+    比不上再用 samefile 比 st_dev/st_ino，这才是「是不是同一个文件」的真答案。
+    """
+
+    if os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+        os.path.abspath(right)
+    ):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        # 任一路径不存在或不可 stat：那就不是同一个文件。
+        return False
+
+
 @asynccontextmanager
 async def _noop_bucket_turn():
     yield
@@ -259,6 +310,15 @@ class MigrateEngine:
         self._has_embeddings: bool = False
         self._zip_db_bytes: Optional[bytes] = None
         self._zip_db_path: str = ""
+        self._source_members: dict[str, bytes | str] = {}
+        self._you_db_bytes: Optional[bytes] = None
+        self._you_db_path: str = ""
+        self._you_service: Any = None
+        self._you_tool_gate: Any = None
+        self._them_db_bytes: Optional[bytes] = None
+        self._them_db_path: str = ""
+        self._them_service: Any = None
+        self._them_tool_gate: Any = None
         self._parse_temp_dir: str = ""
         self._parsed_at_monotonic: float = 0.0
         self._total_buckets: int = 0
@@ -328,6 +388,11 @@ class MigrateEngine:
             shutil.rmtree(temp_dir, ignore_errors=True)
         self._zip_db_bytes = None
         self._zip_db_path = ""
+        self._source_members = {}
+        self._you_db_bytes = None
+        self._you_db_path = ""
+        self._them_db_bytes = None
+        self._them_db_path = ""
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -628,6 +693,11 @@ class MigrateEngine:
         self._has_embeddings = parsed["has_embeddings"]
         self._zip_db_bytes = parsed.get("db_bytes")
         self._zip_db_path = str(parsed.get("db_path") or "")
+        self._source_members = dict(parsed.get("source_members") or {})
+        self._you_db_bytes = parsed.get("you_db_bytes")
+        self._you_db_path = str(parsed.get("you_db_path") or "")
+        self._them_db_bytes = parsed.get("them_db_bytes")
+        self._them_db_path = str(parsed.get("them_db_path") or "")
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -678,11 +748,26 @@ class MigrateEngine:
             _MAX_UNLIMITED_MIGRATE_METADATA_BYTES,
         )
 
+    def _source_content_limit(self) -> int:
+        return min(
+            MIGRATE_MAX_SOURCE_BYTES,
+            self._configured_limit(
+                "max_grow_input_bytes",
+                2 * 1024 * 1024,
+                MIGRATE_MAX_SOURCE_BYTES,
+            ),
+        )
+
     def _normalize_import_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         normalizer = getattr(self._bucket_mgr, "_normalize_metadata_value", None)
         normalized = normalizer(metadata) if callable(normalizer) else metadata
         if not isinstance(normalized, dict):
             raise BackupArchiveError("bucket metadata 必须是对象")
+        if "relation_links" in normalized:
+            try:
+                normalized["relation_links"] = normalize_relation_links(normalized["relation_links"])
+            except ValueError as exc:
+                raise BackupArchiveError(f"relation_links invalid: {exc}") from exc
         try:
             encoded = json.dumps(
                 normalized,
@@ -747,6 +832,12 @@ class MigrateEngine:
         has_embeddings = False
         db_bytes: Optional[bytes] = None
         db_path = ""
+        source_members: dict[str, bytes | str] = {}
+        you_db_bytes: Optional[bytes] = None
+        you_db_path = ""
+        them_db_bytes: Optional[bytes] = None
+        them_db_path = ""
+        referenced_sources: set[str] = set()
         files: dict[str, bytes | str] = package["files"]
         names = set(files)
 
@@ -778,7 +869,54 @@ class MigrateEngine:
                 validate_sqlite_bytes(db_bytes)
                 has_embeddings = bool(db_bytes)
 
-        # 3) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
+        if "you/you.sqlite3" in names:
+            you_source = files["you/you.sqlite3"]
+            try:
+                if disk_backed:
+                    you_db_path = str(you_source)
+                    validate_you_snapshot_file(you_db_path)
+                else:
+                    you_db_bytes = bytes(you_source)
+                    validate_you_snapshot_bytes(you_db_bytes)
+            except YouStoreError as exc:
+                raise BackupArchiveError("You 快照结构校验失败") from exc
+
+        if "them/them.sqlite3" in names:
+            them_source = files["them/them.sqlite3"]
+            try:
+                if disk_backed:
+                    them_db_path = str(them_source)
+                    validate_them_snapshot_file(them_db_path)
+                else:
+                    them_db_bytes = bytes(them_source)
+                    validate_them_snapshot_bytes(them_db_bytes)
+            except ThemStoreError as exc:
+                raise BackupArchiveError("them 快照结构校验失败") from exc
+
+        # 3) 原文证据按文件名中的内容哈希预检。旧版备份可能完全
+        # 没有 sources/，保持可导入并显式告警；但只要包已声称携带证据，
+        # 任何损坏都必须在写入记忆之前整包失败。
+        for arc_path in sorted(names):
+            if not arc_path.startswith("sources/") or not arc_path.endswith(".source"):
+                continue
+            filename = arc_path.removeprefix("sources/")
+            ref = filename[:-len(".source")]
+            if "/" in filename or not SOURCE_REF_RE.fullmatch(ref):
+                raise BackupArchiveError(f"原文证据路径非法: {arc_path}")
+            raw = self._read_member(
+                files[arc_path],
+                limit=self._source_content_limit(),
+                label=arc_path,
+            )
+            if hashlib.sha256(raw).hexdigest() != ref.removeprefix("src_"):
+                raise BackupArchiveError(f"原文证据 SHA-256 校验失败: {arc_path}")
+            try:
+                raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BackupArchiveError(f"原文证据不是 UTF-8: {arc_path}") from exc
+            source_members[ref] = files[arc_path]
+
+        # 4) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
         # 避免界面显示“成功”但实际静默漏掉记忆。
         seen_ids: set[str] = set()
         for arc_path in sorted(names):
@@ -793,6 +931,7 @@ class MigrateEngine:
                 )
                 post = frontmatter.loads(raw.decode("utf-8"))
                 meta = self._normalize_import_metadata(dict(post.metadata))
+                referenced_sources.update(referenced_source_ids_from_metadata(meta))
                 content_size = len((post.content or "").encode("utf-8"))
                 if content_size > content_limit:
                     raise BackupArchiveError(
@@ -837,6 +976,17 @@ class MigrateEngine:
             except Exception as e:
                 raise BackupArchiveError(f"bucket markdown 无法解析: {arc_path}: {e}") from e
 
+        missing_sources = sorted(referenced_sources - set(source_members))
+        integrity_warning = str(package["integrity_warning"] or "")
+        if missing_sources:
+            warning = (
+                f"备份中有 {len(missing_sources)} 个原文证据引用没有对应文件；"
+                "这通常来自 v2.10.0 及更早的备份，事件记忆仍可恢复，但这些原文无法核对"
+            )
+            integrity_warning = "; ".join(
+                part for part in (integrity_warning, warning) if part
+            )
+
         return {
             "buckets": buckets,
             "import_model": import_model,
@@ -845,8 +995,13 @@ class MigrateEngine:
             "has_embeddings": has_embeddings,
             "db_bytes": db_bytes,
             "db_path": db_path,
+            "source_members": source_members,
+            "you_db_bytes": you_db_bytes,
+            "you_db_path": you_db_path,
+            "them_db_bytes": them_db_bytes,
+            "them_db_path": them_db_path,
             "integrity_verified": package["integrity_verified"],
-            "integrity_warning": package["integrity_warning"],
+            "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
         }
 
@@ -931,8 +1086,13 @@ class MigrateEngine:
         buckets_dir = self._config.get("buckets_dir", "buckets")
         imported_id_map: dict[str, str] = {}
         imported_files: dict[str, str] = {}
+        package_bucket_ids = frozenset(pb.bucket_id for pb in self._parsed_buckets)
 
         try:
+            # 先发布内容寻址的原文，然后才允许任何 bucket 引用落盘。
+            # 若证据安装失败，整次 apply 在记忆写入前终止。
+            if self._source_members:
+                await _to_thread_reaped(self._install_source_members, buckets_dir)
             ensure_path_index = getattr(
                 self._bucket_mgr,
                 "_ensure_bucket_path_index",
@@ -967,6 +1127,10 @@ class MigrateEngine:
                 self._apply_done += 1
 
             # ---- 向量数据处理 ----
+            await _to_thread_reaped(
+                self._remap_imported_relation_targets, imported_files, imported_id_map,
+                package_bucket_ids,
+            )
             merged_ids: set[str] = set()
             if embedding_matches and self._has_embeddings and (
                 self._zip_db_bytes or self._zip_db_path
@@ -997,6 +1161,32 @@ class MigrateEngine:
             ]
             await self._schedule_reindex()
 
+            # 两个模块各自判断有没有快照要装。exact_restore 只算一次：
+            # 它问的是「这批记忆是不是按原 ID 完整导入的」，与哪个模块无关。
+            exact_restore = (
+                len(imported_id_map) == len(self._parsed_buckets)
+                and all(source_id == target_id for source_id, target_id in imported_id_map.items())
+            )
+            for 标签, 有快照, 安装 in (
+                ("You", bool(self._you_db_bytes or self._you_db_path),
+                 self._install_you_snapshot),
+                ("them", bool(self._them_db_bytes or self._them_db_path),
+                 self._install_them_snapshot),
+            ):
+                if not 有快照:
+                    continue
+                if not exact_restore:
+                    self._apply_errors.append(
+                        f"{标签} 快照未恢复：记忆未按原 ID 完整导入"
+                    )
+                    continue
+                try:
+                    await _to_thread_reaped(安装, buckets_dir)
+                except Exception as exc:
+                    message = f"{标签} 快照恢复失败，已保留当前状态: {exc}"
+                    logger.warning("[migrate] %s", message)
+                    self._apply_errors.append(message)
+
             invalidate = getattr(self._bucket_mgr, "_invalidate_bm25", None)
             if callable(invalidate):
                 invalidate()
@@ -1017,6 +1207,149 @@ class MigrateEngine:
             self._cleanup_parse_artifacts()
             self._parsed_buckets = []
             self._buckets_to_reindex = []
+
+    def attach_you_runtime(self, service: Any, tool_gate: Any) -> None:
+        self._you_service = service
+        self._you_tool_gate = tool_gate
+
+    def attach_them_runtime(self, service: Any, tool_gate: Any) -> None:
+        self._them_service = service
+        self._them_tool_gate = tool_gate
+
+    def _install_module_snapshot(
+        self,
+        buckets_dir: str,
+        *,
+        目录名: str,
+        文件名: str,
+        标签: str,
+        源路径: str,
+        源字节: Optional[bytes],
+        校验,
+        service: Any,
+        gate: Any,
+    ) -> None:
+        """把一份模块库快照落进 vault，落定之后同步该模块的 MCP 显隐。
+
+        you 与 them 共用这一套。两边的恢复语义本来就一样，各写一份的结果是
+        其中一边慢慢漏掉某个检查——而这里每一个检查都在防一件具体的事：
+        符号链接（把写入引到 vault 之外）、先校验后 os.replace（半份库不落地）、
+        以及恢复完必须重新对齐工具显隐（库里说开着、清单里没有，反过来更糟）。
+        """
+        base = os.path.abspath(buckets_dir)
+        root = os.path.join(base, 目录名)
+        if os.path.lexists(root) and os.path.islink(root):
+            raise BackupArchiveError(f"{标签} 恢复目录不能是符号链接")
+        os.makedirs(root, exist_ok=True)
+        target = os.path.join(root, 文件名)
+        if os.path.lexists(target) and os.path.islink(target):
+            raise BackupArchiveError(f"{标签} 恢复目标不能是符号链接")
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix=f"{标签.lower()}-restore-", suffix=".db", dir=root
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                if 源路径:
+                    with open(源路径, "rb") as source:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                else:
+                    output.write(源字节 or b"")
+                output.flush()
+                os.fsync(output.fileno())
+            校验(temp_path)
+            os.replace(_win_long_path(temp_path), _win_long_path(target))
+        finally:
+            _safe_unlink(temp_path)
+
+        if service is None or gate is None:
+            return
+        # 整库被替换掉了，缓存的开关状态一定是旧的。
+        try:
+            service.store.invalidate_state_cache()
+        except Exception:
+            pass
+        state = service.status()
+        try:
+            gate.sync(state.enabled)
+        except Exception:
+            if state.enabled:
+                try:
+                    service.set_enabled(False, expected_revision=state.state_revision)
+                except Exception:
+                    pass
+            try:
+                gate.sync(False)
+            except Exception:
+                pass
+            raise BackupArchiveError(f"{标签} MCP 状态同步失败")
+
+    def _install_you_snapshot(self, buckets_dir: str) -> None:
+        self._install_module_snapshot(
+            buckets_dir,
+            目录名=".you",
+            文件名="you.sqlite3",
+            标签="You",
+            源路径=self._you_db_path,
+            源字节=self._you_db_bytes,
+            校验=validate_you_snapshot_file,
+            service=self._you_service,
+            gate=self._you_tool_gate,
+        )
+
+    def _install_them_snapshot(self, buckets_dir: str) -> None:
+        self._install_module_snapshot(
+            buckets_dir,
+            目录名=".them",
+            文件名="them.sqlite3",
+            标签="them",
+            源路径=self._them_db_path,
+            源字节=self._them_db_bytes,
+            校验=validate_them_snapshot_file,
+            service=self._them_service,
+            gate=self._them_tool_gate,
+        )
+
+    def _install_source_members(self, buckets_dir: str) -> None:
+        source_limit = self._source_content_limit()
+        store = SourceStore(buckets_dir, max_bytes=source_limit)
+        for ref, source in sorted(self._source_members.items()):
+            raw = self._read_member(
+                source,
+                limit=source_limit,
+                label=f"sources/{ref}.source",
+            )
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BackupArchiveError(f"原文证据不是 UTF-8: {ref}") from exc
+            installed_ref = store.put(content)
+            if installed_ref != ref:
+                raise BackupArchiveError(f"原文证据内容与引用不匹配: {ref}")
+
+    def _remap_imported_relation_targets(
+        self, files: dict[str, str], id_map: dict[str, str], package_bucket_ids: frozenset[str]
+    ) -> None:
+        """Remap Relation targets without retaining failed in-package edges."""
+        for _target_id, path in files.items():
+            post = frontmatter.load(path)
+            links = normalize_relation_links(post.metadata.get("relation_links"))
+            changed = False
+            for link in links:
+                target_id = link["target_bucket_id"]
+                mapped = id_map.get(target_id)
+                if mapped and mapped != target_id:
+                    link["target_bucket_id"] = mapped
+                    changed = True
+                elif target_id in package_bucket_ids and not mapped and link["status"] != "detached":
+                    link["status"] = "detached"
+                    changed = True
+                    logger.warning(
+                        "[migrate] detached Relation target %s in %s because it was not imported",
+                        target_id, _target_id,
+                    )
+            if changed:
+                post["relation_links"] = links
+                self._atomic_write(path, frontmatter.dumps(post))
 
     async def _apply_one_bucket(
         self,
@@ -1165,7 +1498,9 @@ class MigrateEngine:
             # Hard-linking a complete same-filesystem staging inode gives us
             # O_EXCL semantics on both POSIX and Windows; os.replace would
             # silently overwrite an unrelated file with the same filename.
-            os.link(temp_path_long, target_long)
+            # 硬链接不可用的文件系统（Termux/Android 的 FUSE、部分 NAS/SMB）走
+            # publish_new_file 里的 O_CREAT|O_EXCL 兜底，语义一样，不退化成覆盖。
+            publish_new_file(temp_path_long, target_long, rendered)
         finally:
             _safe_unlink(temp_path_long)
 
@@ -1232,10 +1567,12 @@ class MigrateEngine:
         )
         historical_path = ""
         target_created = False
-        same_target = (
-            os.path.normcase(os.path.abspath(existing_path))
-            == os.path.normcase(os.path.abspath(target_path))
-        )
+        same_target = _is_same_file(existing_path, target_path)
+        if same_target:
+            # 覆盖活动桶时沿用磁盘上现有的文件名拼写与位置，只换内容和元数据。
+            # macOS 实测 os.replace 本来就会保留原拼写，但别的大小写不敏感
+            # 文件系统未必一致——写明比依赖文件系统行为稳。
+            target_path = existing_path
         try:
             if not same_target and os.path.exists(target_path):
                 raise FileExistsError(f"恢复目标已存在: {target_path}")
@@ -1534,7 +1871,25 @@ class MigrateEngine:
         value_type: Any,
         declared_size: Any,
         expected_dimension: int,
-    ) -> str | None:
+    ) -> str | bytes | None:
+        # BLOB 那条路不经过 _normalize_embedding_text——那个函数是给文本用的，
+        # 会把二进制向量判成非法然后返回 None，于是整包记忆的向量在迁移时被
+        # 静默丢光（向量能重建，但用户会莫名其妙地要重新跑一遍全量向量化）。
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            if len(bytes(value)) > _MAX_EMBEDDING_CELL_BYTES:
+                return None
+            try:
+                parsed = decode_vector(value).tolist()
+            except (ValueError, TypeError):
+                return None
+            if (
+                not parsed
+                or len(parsed) > _MAX_EMBEDDING_DIMENSIONS
+                or (expected_dimension and len(parsed) != expected_dimension)
+            ):
+                return None
+            return encode_vector(parsed)
+
         payload = cls._normalize_embedding_text(
             value,
             value_type,

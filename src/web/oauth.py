@@ -34,7 +34,7 @@ import threading as _threading
 from starlette.requests import Request
 from starlette.responses import Response
 
-from public_origin import (
+from ombrebrain.security.public_origin import (
     configured_public_origin,
     normalize_http_resource,
     normalize_public_origin,
@@ -65,9 +65,13 @@ _OAUTH_CLIENT_TTL = 86400 * 365
 # public attacker permanently consume the bounded registry.
 _OAUTH_CLIENT_PENDING_TTL = 3600
 _MAX_OAUTH_CLIENTS = 1024
+# 未授权注册应使用远小于长期已授权客户端的独立配额。与
+# _MAX_OAUTH_CLIENTS 分开计数，保持既有已授权客户端容量语义。
+_MAX_PENDING_OAUTH_CLIENTS = 128
 _MAX_OAUTH_CODES = 1024
 _MAX_REDIRECT_URIS = 10
 _MAX_REDIRECT_URI_CHARS = 2048
+_MAX_REDIRECT_URIS_TOTAL_CHARS = 4096
 _MAX_CLIENT_NAME_CHARS = 200
 _PKCE_PATTERN = _re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _FORBIDDEN_REDIRECT_SCHEMES = {
@@ -96,14 +100,13 @@ class OAuthPersistenceError(RuntimeError):
 def _oauth_required_from_config() -> bool:
     """Snapshot the effective MCP auth mode used for this server process.
 
-    OAuth and the static-token mode (mcp_auth_mode: "token") are mutually
-    exclusive: when token mode is selected, every OAuth discovery/register/
-    authorize/token route below 404s via _oauth_not_found(), same as when
-    mcp_require_auth is false outright.
+    OAuth 在 oauth 与 hybrid 模式可用；只有纯 token 模式会让 discovery、
+    register、authorize、token 路由经 _oauth_not_found() 返回 404。
     """
     return (
         parse_bool(sh.config.get("mcp_require_auth", True), default=True)
-        and str(sh.config.get("mcp_auth_mode", "oauth")).strip().lower() == "oauth"
+        and str(sh.config.get("mcp_auth_mode", "oauth")).strip().lower()
+        in ("oauth", "hybrid")
     )
 
 
@@ -336,6 +339,11 @@ def _normalize_client_registration(body: object) -> tuple[dict | None, str]:
         or any(not _valid_redirect_uri(uri) for uri in redirect_uris)
     ):
         return None, "redirect_uris must contain 1-10 safe absolute callback URIs"
+    if sum(len(uri) for uri in redirect_uris) > _MAX_REDIRECT_URIS_TOTAL_CHARS:
+        return None, (
+            "redirect_uris total length must not exceed "
+            f"{_MAX_REDIRECT_URIS_TOTAL_CHARS} characters"
+        )
     client_name = body.get("client_name", "MCP Client")
     if not isinstance(client_name, str):
         return None, "client_name must be a string"
@@ -760,12 +768,11 @@ def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
 
 
 def _is_valid_static_mcp_token(token: str, resource: str = "") -> bool:
-    """Validate against the static mcp_auth_mode=token secret.
+    """根据 mcp_auth_mode=token/hybrid 的静态密钥校验 Token。
 
-    Reads sh.config / env fresh on every call (no startup snapshot) so that
-    regenerating the token via the Dashboard takes effect immediately without
-    a process restart. resource is accepted for TokenValidator signature
-    compatibility but ignored — a static token is not bound to one resource.
+    每次调用都重新读取 sh.config / 环境变量，不使用启动快照，因此在
+    Dashboard 重新生成 Token 后无需重启进程即可生效。resource 参数仅为兼容
+    TokenValidator 签名而保留；静态 Token 不绑定单个资源。
     """
     if not token:
         return False
@@ -775,7 +782,18 @@ def _is_valid_static_mcp_token(token: str, resource: str = "") -> bool:
     )
     if not configured:
         return False
-    return _hmac.compare_digest(token, configured)
+    # compare_digest(str, str) 遇非 ASCII 会抛 TypeError。先变成固定长度摘要，
+    # 既兼容 Unicode 错误配置，也不通过长度差异提前返回。
+    supplied_digest = _hashlib_oauth.sha256(token.encode("utf-8")).digest()
+    configured_digest = _hashlib_oauth.sha256(configured.encode("utf-8")).digest()
+    return _hmac.compare_digest(supplied_digest, configured_digest)
+
+
+def _oauth_log_field(value: object, max_chars: int) -> str:
+    """移除日志字段中的控制字符并限制长度。"""
+    if max_chars <= 0:
+        return ""
+    return "".join(char for char in str(value) if char.isprintable())[:max_chars]
 
 
 def _issue_mcp_access_token(resource: str = "") -> str:
@@ -851,6 +869,7 @@ def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
         client_info = dict(stored_client) if isinstance(stored_client, dict) else {}
     client_name = e(str(client_info.get("client_name") or "MCP Client"))
     callback = e(redirect_uri[:240])
+    trace_id = secrets.token_hex(6)
     err_html = f'<p style="color:#ff6b6b;font-size:13px;margin-top:12px;">{e(error)}</p>' if error else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -868,25 +887,49 @@ input[type=password]{{display:block;width:100%;padding:11px 14px;background:#111
 button{{width:100%;padding:12px;background:#c9a96e;color:#0f0f0f;border:none;
   border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}}
 button:hover{{background:#d4b87a}}
+button:disabled{{opacity:.65;cursor:wait}}
+.submit-status{{display:none;color:#c9a96e;font-size:12px;margin-top:12px;line-height:1.5}}
 .note{{color:#666;font-size:11px;margin-top:16px;line-height:1.6}}
 </style></head>
 <body><div class="card">
 <h2>◐ Ombre Brain</h2>
 <p class="sub">授权 {ai_name} 连接 MCP</p>
 <p class="note">请求方：{client_name}<br>回调：{callback}</p>
-<form method="POST">
+<form method="POST" id="oauth-form">
 <input type="hidden" name="client_id" value="{e(client_id)}">
 <input type="hidden" name="redirect_uri" value="{e(redirect_uri)}">
 <input type="hidden" name="state" value="{e(state)}">
 <input type="hidden" name="code_challenge" value="{e(code_challenge)}">
 <input type="hidden" name="resource" value="{e(resource)}">
 <input type="hidden" name="scope" value="{e(scope)}">
+<input type="hidden" name="trace_id" value="{trace_id}">
 <input type="password" name="password" placeholder="输入 Dashboard 密码" autofocus>
-<button type="submit">授权并连接</button>
+<button type="submit" id="oauth-submit">授权并连接</button>
 </form>
+<p class="submit-status" id="submit-status" role="status" aria-live="polite"></p>
 {err_html}
-<p class="note">授权后 {ai_name} 将可使用 MCP 工具读写记忆。<br>Token 长期有效，并支持自动续期。<br>若工具调用失败，请在客户端断开重连，再重新点击此页授权即可。</p>
-</div></body></html>"""
+<p class="note">授权后 {ai_name} 将可使用 MCP 工具读写记忆。<br>Token 长期有效，并支持自动续期。<br>若工具调用失败，请在客户端断开重连，再重新点击此页授权即可。<br>诊断编号：{trace_id}</p>
+</div>
+<script>
+(() => {{
+  const form = document.getElementById('oauth-form');
+  const button = document.getElementById('oauth-submit');
+  const status = document.getElementById('submit-status');
+  form.addEventListener('submit', () => {{
+    button.disabled = true;
+    button.textContent = '正在验证…';
+    status.style.display = 'block';
+    status.textContent = '正在验证密码并生成授权码，请勿关闭此页。';
+    window.setTimeout(() => {{
+      if (!document.hidden) {{
+        button.disabled = false;
+        button.textContent = '重试授权';
+        status.textContent = '等待超过 30 秒。请记下诊断编号 {trace_id}，再重试或查看服务端日志。';
+      }}
+    }}, 30000);
+  }});
+}})();
+</script></body></html>"""
 
 
 def register(mcp) -> None:
@@ -985,6 +1028,20 @@ def register(mcp) -> None:
                 if isinstance(key, str) and isinstance(value, dict)
             }
             _cleanup_oauth_clients_locked(now, candidate)
+            pending_count = sum(
+                1
+                for data in candidate.values()
+                if data.get("activated") is not True
+            )
+            if pending_count >= max(1, int(_MAX_PENDING_OAUTH_CLIENTS)):
+                return JSONResponse(
+                    {"error": "temporarily_unavailable"},
+                    status_code=429,
+                    headers={
+                        "Retry-After": "60",
+                        "Cache-Control": "no-store",
+                    },
+                )
             if len(candidate) >= max(1, int(_MAX_OAUTH_CLIENTS)):
                 if not _evict_oldest_pending_client_locked(candidate):
                     return JSONResponse(
@@ -1068,6 +1125,13 @@ def register(mcp) -> None:
         code_challenge = str(form.get("code_challenge", ""))
         requested_resource = str(form.get("resource", ""))
         scope = str(form.get("scope", _MCP_SCOPE)) or _MCP_SCOPE
+        trace_id = _oauth_log_field(form.get("trace_id", ""), 32) or secrets.token_hex(6)
+        logged_client_id = _oauth_log_field(client_id, 24)
+        sh.logger.info(
+            "op=oauth_authorize phase=post trace_id=%s client_id=%s",
+            trace_id,
+            logged_client_id,
+        )
 
         ok, err = _validate_authorize_redirect(client_id, redirect_uri)
         resource_ok, resource = _mcp_resource(
@@ -1136,6 +1200,11 @@ def register(mcp) -> None:
             )
         if not verified:
             sh._record_login_failure(request)
+            sh.logger.warning(
+                "op=oauth_authorize phase=password_failed trace_id=%s client_id=%s",
+                trace_id,
+                logged_client_id,
+            )
             return HTMLResponse(_oauth_authorize_html(
                 client_id, redirect_uri, state, code_challenge,
                 resource=resource, scope=scope, error="密码错误，请重试"
@@ -1201,6 +1270,11 @@ def register(mcp) -> None:
         location = f"{redirect_uri}{sep}code={_urlparse.quote(code)}"
         if state:
             location += f"&state={_urlparse.quote(state)}"
+        sh.logger.info(
+            "op=oauth_authorize phase=redirect trace_id=%s client_id=%s",
+            trace_id,
+            logged_client_id,
+        )
         return RedirectResponse(location, status_code=302)
 
     @mcp.custom_route("/oauth/token", methods=["POST"])

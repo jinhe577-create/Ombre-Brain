@@ -26,9 +26,9 @@ from starlette.responses import Response, StreamingResponse
 from . import _shared as sh
 
 try:
-    from utils import parse_bool  # type: ignore
+    from utils import parse_bool, atomic_update_config_yaml  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import parse_bool  # type: ignore
+    from ..utils import parse_bool, atomic_update_config_yaml  # type: ignore
 
 
 def _restart_self() -> None:
@@ -85,6 +85,8 @@ _AUTHOR_NOTE = {
         {"body": "一个兴趣使然的开发者", "signature": "——万世"},
     ],
     # 爱发电区块上方的文案。
+    # 这句改了七遍。
+    # 可恶写完又要发小红书不想写文案…
     "support": "如果 OB 对你有用，可以在爱发电支持我们。如果没有，也感谢你用过它。",
 }
 
@@ -92,16 +94,24 @@ _AUTHOR_NOTE = {
 # --- 热更新来源与依赖安装的安全闸门（安全加固 #2）---
 # do-update 会把远端 zip 覆盖到 src/ 并 pip install，等于把「谁能改 config.update」
 # 直接放大成 RCE。默认只信官方仓；fork/自建源需显式 env 放行。自动 pip 默认关闭。
-# fork 定制：本 fork 的一键更新拉的是自己的仓库（jinhe577-create），
-# 对本部署而言它就是官方源，与上游同级可信；其它任意仓库仍走
-# OMBRE_ALLOW_CUSTOM_UPDATE_REPO 显式放行，安全闸门语义不变。
-_TRUSTED_UPDATE_REPOS = ("jinhe577-create/ombre-brain", "p0luz/ombre-brain")
+_TRUSTED_UPDATE_REPOS = ("p0luz/ombre-brain",)
 _MAX_UPDATE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_UPDATE_MEMBERS = 5_000
 _MAX_UPDATE_MEMBER_BYTES = 16 * 1024 * 1024
 _MAX_UPDATE_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_UPDATE_COMPRESSION_RATIO = 500.0
+_ARCHIVED_LETTER_RESTORE_MAX_IDS = 100
+_ARCHIVED_LETTER_RESTORE_ID_MAX_CHARS = 128
 _MAX_UPDATE_MANIFEST_BYTES = 2 * 1024 * 1024
+_MAX_DEPENDENCY_MANIFEST_BYTES = 2 * 1024 * 1024
+_DEPENDENCY_MANIFEST_NAMES = ("requirements.txt", "requirements.lock.txt")
+_DEPENDENCY_ABSENCE_PREFIX = ".absent-"
+_LOCK_REQUIREMENT_LINE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?=="
+    r"[A-Za-z0-9][A-Za-z0-9.!+_-]*"
+    r"(?:\s*;\s*[^@/:\\]+)?\s*\\?$"
+)
+_LOCK_HASH_LINE_RE = re.compile(r"^--hash=sha256:[0-9a-fA-F]{64}\s*\\?$")
 
 # A hot update mutates the live source tree and its single ``_prev`` rollback
 # point.  The reservation therefore has to be process-wide, rather than an
@@ -520,11 +530,18 @@ def _restore_from_prev(repo_root: str, prev_dir: str, src_root: str, frontend_ro
                     shutil.copy2(prev_ver, _vp)
                 except OSError:
                     pass
-        prev_requirements = os.path.join(prev_dir, "requirements.txt")
-        if os.path.isfile(prev_requirements):
-            shutil.copy2(
-                prev_requirements, os.path.join(repo_root, "requirements.txt")
+        for root_name in _DEPENDENCY_MANIFEST_NAMES:
+            previous = os.path.join(prev_dir, root_name)
+            current = os.path.join(repo_root, root_name)
+            absent_marker = os.path.join(
+                prev_dir, f"{_DEPENDENCY_ABSENCE_PREFIX}{root_name}"
             )
+            if os.path.isfile(previous):
+                shutil.copy2(previous, current)
+            elif os.path.isfile(absent_marker) and os.path.isfile(current):
+                # 本次更新可能给旧版运行目录首次补入 lock。回滚必须恢复“原本不存在”
+                # 的状态，否则下次更新会把失败版本的清单误当成当前基线。
+                os.remove(current)
         return True
     except Exception:
         return False
@@ -548,10 +565,18 @@ def _inspect_update_archive(archive_path: str) -> dict:
             version_bytes = None
         try:
             requirements_bytes = _read_bounded_zip_member(
-                zf, top + "requirements.txt", 2 * 1024 * 1024
+                zf, top + "requirements.txt", _MAX_DEPENDENCY_MANIFEST_BYTES
             )
         except KeyError:
             requirements_bytes = None
+        try:
+            requirements_lock_bytes = _read_bounded_zip_member(
+                zf,
+                top + "requirements.lock.txt",
+                _MAX_DEPENDENCY_MANIFEST_BYTES,
+            )
+        except KeyError:
+            requirements_lock_bytes = None
         return {
             "top": top,
             "target_version": (
@@ -561,6 +586,7 @@ def _inspect_update_archive(archive_path: str) -> dict:
             ),
             "version_bytes": version_bytes,
             "requirements_bytes": requirements_bytes,
+            "requirements_lock_bytes": requirements_lock_bytes,
             "plan": _plan_update_files(zf, top),
         }
 
@@ -582,10 +608,20 @@ def _backup_update_tree(
     shutil.copytree(src_root, os.path.join(prev_dir, "src"))
     if os.path.isdir(frontend_root):
         shutil.copytree(frontend_root, os.path.join(prev_dir, "frontend"))
-    for root_name in ("VERSION", "requirements.txt"):
+    for root_name in ("VERSION",):
         current = os.path.join(repo_root, root_name)
         if os.path.isfile(current):
             shutil.copy2(current, os.path.join(prev_dir, root_name))
+    for root_name in _DEPENDENCY_MANIFEST_NAMES:
+        current = os.path.join(repo_root, root_name)
+        if os.path.isfile(current):
+            shutil.copy2(current, os.path.join(prev_dir, root_name))
+        else:
+            marker = os.path.join(
+                prev_dir, f"{_DEPENDENCY_ABSENCE_PREFIX}{root_name}"
+            )
+            with open(marker, "wb"):
+                pass
 
 
 def _apply_update_files(
@@ -621,35 +657,184 @@ def _apply_update_files(
     return updated
 
 
-def _requirements_changed(repo_root: str, new_requirements: bytes | None) -> bool:
-    if new_requirements is None or not new_requirements.strip():
+def _normalize_dependency_manifest(data: bytes | None) -> bytes:
+    """只消除跨平台换行差异，不改写任何依赖或 hash 内容。"""
+
+    if not data:
+        return b""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").strip()
+
+
+def _runtime_satisfies_locked_versions(lock_bytes: bytes) -> bool:
+    """只读确认当前解释器是否已经满足新版发布锁。
+
+    早期 Docker 实例可能一路只热更新代码，运行目录和旧镜像都没有留下
+    ``requirements.lock.txt``。过去这种“没有可比较基线”会被一律当成依赖变化，
+    即使当前解释器本来已经安装了完全相同的版本，也会误回滚。
+
+    这里让 pip 仅做本机 dry-run：禁用索引、依赖解析、缓存和版本检查，不访问网络、
+    不安装任何内容。传给 pip 前还会拒绝 URL、全局选项、可编辑依赖等非标准锁语法，
+    防止自定义更新源借“探测”读取外部地址。任何解析失败、缺包、版本不符、pip 太旧
+    或超时都返回 False，由原有门禁继续 fail closed。
+    """
+
+    normalized = _normalize_dependency_manifest(lock_bytes)
+    if not normalized:
         return False
-    requirements_path = os.path.join(repo_root, "requirements.txt")
-    old_requirements = b""
-    if os.path.isfile(requirements_path):
-        with open(requirements_path, "rb") as handle:
-            old_requirements = handle.read(2 * 1024 * 1024 + 1)
-        if len(old_requirements) > 2 * 1024 * 1024:
-            raise ValueError("当前 requirements.txt 超过 2 MiB 上限")
-    return new_requirements.strip() != old_requirements.strip()
+    try:
+        text = normalized.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+
+    requirement_count = 0
+    hash_count = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if _LOCK_REQUIREMENT_LINE_RE.fullmatch(line):
+            requirement_count += 1
+            continue
+        if _LOCK_HASH_LINE_RE.fullmatch(line):
+            hash_count += 1
+            continue
+        return False
+    if requirement_count == 0 or hash_count == 0:
+        return False
+
+    import subprocess
+    import tempfile
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".lock.txt", delete=False
+        ) as handle:
+            handle.write(normalized + b"\n")
+            path = handle.name
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "--isolated",
+            "--disable-pip-version-check",
+            "install",
+            "--dry-run",
+            "--no-index",
+            "--no-deps",
+            "--no-cache-dir",
+            "--require-hashes",
+            "-r",
+            path,
+        ]
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
-def _install_update_requirements(requirements_path: str, data: bytes):
-    """Atomically store requirements and run pip without buffering its output."""
+def _read_dependency_baseline(repo_root: str, root_name: str) -> bytes | None:
+    """读取当前依赖基线；持久代码目录缺文件时回退镜像内置根目录。"""
+
+    roots = [os.path.abspath(repo_root)]
+    configured_image_root = os.environ.get("OMBRE_IMAGE_ROOT", "").strip()
+    if configured_image_root:
+        image_root = os.path.abspath(configured_image_root)
+        if image_root not in roots:
+            roots.append(image_root)
+    elif sh.in_docker():
+        image_root = os.path.abspath("/app")
+        if image_root not in roots:
+            roots.append(image_root)
+
+    for root in roots:
+        path = os.path.join(root, root_name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as handle:
+            data = handle.read(_MAX_DEPENDENCY_MANIFEST_BYTES + 1)
+        if len(data) > _MAX_DEPENDENCY_MANIFEST_BYTES:
+            raise ValueError(f"当前 {root_name} 超过 2 MiB 上限")
+        if data.strip():
+            return data
+    return None
+
+
+def _requirements_changed(
+    repo_root: str,
+    new_requirements: bytes | None,
+    new_requirements_lock: bytes | None = None,
+) -> bool:
+    """判断新版依赖是否需要安装，旧包缺 lock 时兼容原判定。"""
+
+    new_lock = _normalize_dependency_manifest(new_requirements_lock)
+    if new_lock:
+        old_lock = _read_dependency_baseline(repo_root, "requirements.lock.txt")
+        if old_lock is not None:
+            return new_lock != _normalize_dependency_manifest(old_lock)
+        # 不能拿宽松 requirements.txt 猜测传递依赖是否相同；仅在历史实例完全
+        # 缺少 lock 基线、当前解释器又精确满足新版带 hash 发布锁时跳过 pip。
+        # 已有且不同的旧 lock 仍代表真实依赖迁移，保持原有 fail-closed 门禁。
+        return not _runtime_satisfies_locked_versions(new_lock)
+
+    new_source = _normalize_dependency_manifest(new_requirements)
+    if not new_source:
+        return False
+    old_source = _read_dependency_baseline(repo_root, "requirements.txt")
+    return new_source != _normalize_dependency_manifest(old_source)
+
+
+def _sync_update_dependency_manifests(
+    repo_root: str,
+    requirements_bytes: bytes | None,
+    requirements_lock_bytes: bytes | None,
+) -> None:
+    """成功更新时同步根级依赖清单，使后续热更新拥有稳定本地基线。"""
+
+    for root_name, data in (
+        ("requirements.txt", requirements_bytes),
+        ("requirements.lock.txt", requirements_lock_bytes),
+    ):
+        if data is not None and data.strip():
+            _atomic_write_bytes(os.path.join(repo_root, root_name), data)
+
+
+def _install_update_requirements(
+    requirements_path: str,
+    data: bytes,
+    *,
+    require_hashes: bool = False,
+):
+    """原子保存依赖清单，并在工作线程中执行受约束的 pip 安装。"""
 
     import subprocess
 
     _atomic_write_bytes(requirements_path, data)
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+    ]
+    if require_hashes:
+        command.append("--require-hashes")
+    command.extend(("-r", requirements_path))
     return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-cache-dir",
-            "-r",
-            requirements_path,
-        ],
+        command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=600,
@@ -819,7 +1004,52 @@ def register(mcp) -> None:
             "hot_update_persistent": persistence["persistent"],
             "hot_update_mode": persistence["mode"],
             "hot_update_note": persistence["note"],
+            "update_allow_pip_install": _pip_install_allowed(),
         })
+
+    @mcp.custom_route("/api/update-settings", methods=["POST"])
+    async def api_update_settings(request: Request) -> Response:
+        """持久化「热更新遇到依赖变化时是否自动 pip install」这一个开关。
+
+        这不是把默认值改掉——OMBRE_UPDATE_ALLOW_PIP 环境变量默认关闭的安全立场
+        （安全加固 #2：自动 pip 把「谁能点热更新」放大成任意 PyPI 包的 RCE 面）
+        没有变化，这里只是把已经存在、此前只能靠 SSH 改 env 才能碰到的
+        config.update.allow_pip_install 开关，暴露成 Dashboard 上能点的一个选项，
+        由部署者自己清醒地打开。写入 config.yaml 后立即在运行态生效，不需要重启
+        （_pip_install_allowed() 每次 do-update 都会重新读取）。
+        """
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+        if "allow_pip_install" not in body:
+            return JSONResponse(
+                {"ok": False, "error": "缺少 allow_pip_install 字段"}, status_code=400
+            )
+        allow = bool(body.get("allow_pip_install"))
+
+        def _mutate(saved: dict) -> None:
+            update_cfg = saved.get("update")
+            if not isinstance(update_cfg, dict):
+                update_cfg = {}
+                saved["update"] = update_cfg
+            update_cfg["allow_pip_install"] = allow
+
+        try:
+            atomic_update_config_yaml(_mutate)
+        except Exception as e:
+            return JSONResponse(
+                {"ok": False, "error": f"写 config.yaml 失败：{e}"}, status_code=500
+            )
+
+        if not isinstance(sh.config.get("update"), dict):
+            sh.config["update"] = {}
+        sh.config["update"]["allow_pip_install"] = allow
+        return JSONResponse({"ok": True, "allow_pip_install": allow})
 
     @mcp.custom_route("/api/do-update", methods=["POST"])
     async def api_do_update(request: Request) -> Response:
@@ -874,7 +1104,7 @@ def register(mcp) -> None:
                 # #4a ③：更新源可配（update.repo / update.ref），默认官方 main。
                 _ucfg = getattr(sh, "config", {}) or {}
                 _ucfg = _ucfg.get("update") or {}
-                _repo = str(_ucfg.get("repo") or "jinhe577-create/Ombre-Brain").strip().strip("/")
+                _repo = str(_ucfg.get("repo") or "P0luz/Ombre-Brain").strip().strip("/")
                 _ref  = str(_ucfg.get("ref")  or "main").strip()
                 # 安全闸门 #2：非官方更新源必须显式放行，否则拒绝——防止「改 config.update.repo
                 # 指向恶意仓 → 覆盖 src → 重启执行」这条 RCE 链在默认配置下成立。
@@ -928,6 +1158,8 @@ def register(mcp) -> None:
                 )
                 plan = inspected["plan"]
                 target_version = inspected["target_version"]
+                requirements_bytes = inspected.get("requirements_bytes")
+                requirements_lock_bytes = inspected.get("requirements_lock_bytes")
 
                 # Refuse a valid-but-older archive before creating _prev or
                 # touching any runtime file.  Explicit release-channel users
@@ -943,14 +1175,33 @@ def register(mcp) -> None:
                     yield f"data: ERROR:{plan['abort']}（已中止，未改动任何文件）\n\n"
                     return
 
-                yield "data: 下载完成，正在解压文件…\n\n"
-                await _asyncio.sleep(0.1)
-
                 # 目标根目录用注入的 sh.repo_root（Docker 下 = /app；裸机/VPS = 实际安装目录）。
                 # 绝不能在这里用 __file__：本文件在 src/web/ 下，算出来会差一层。
                 repo_root = sh.repo_root
                 src_root = os.path.join(repo_root, "src")
                 frontend_root = os.path.join(repo_root, "frontend")
+
+                # 依赖是否变化只需要「刚下载的清单」+「磁盘上现有清单」，跟这次更新有没有
+                # 真的写文件无关。提前到备份/写盘之前判断：pip 关闭又确实需要装时直接在这里
+                # 拒绝，不用先建 _prev 备份、写完文件再回滚一遍——省一轮磁盘 I/O，报错也更准确
+                # （这时候是真的「未改动任何文件」，不是「已回滚」）。
+                requirements_changed = await _await_update_worker(
+                    _requirements_changed,
+                    repo_root,
+                    requirements_bytes,
+                    requirements_lock_bytes,
+                )
+                if requirements_changed and not _pip_install_allowed():
+                    yield (
+                        "data: ERROR:新版依赖清单有变化，自动 pip 安装处于关闭状态；"
+                        "未改动任何文件。可在 Dashboard「热更新」里打开"
+                        "「允许自动安装新依赖」开关后重试，或重建镜像，或设置 "
+                        "OMBRE_UPDATE_ALLOW_PIP=1 后重试。\n\n"
+                    )
+                    return
+
+                yield "data: 下载完成，正在解压文件…\n\n"
+                await _asyncio.sleep(0.1)
 
                 # #4a ②：覆盖前把当前 src/frontend 备份成回滚点 _prev，坏更新崩溃时 entrypoint 还原。
                 prev_dir = os.path.join(repo_root, "_prev")
@@ -998,40 +1249,37 @@ def register(mcp) -> None:
                 if inspected["version_bytes"] is not None:
                     yield f"data: 版本号已同步为 v{target_version}…\n\n"
 
-                # #4a ③：依赖变更 → best-effort pip install。  Comparing,
-                # writing, and the potentially ten-minute subprocess are all
-                # off-loop and remain protected from cancellation races.
+                # #4a ③：先同步清单，再完成代码编译自检；只有这些可回滚步骤全部成功后
+                # 才允许 pip 改动解释器环境，避免后续失败留下半更新依赖。requirements_changed
+                # 与「pip 关闭时直接拒绝」已经在备份/写盘之前判断过了，这里只管安装。
+                install_lock = False
+                install_name = ""
+                install_bytes = None
                 try:
-                    requirements_changed = await _await_update_worker(
-                        _requirements_changed,
-                        repo_root,
-                        inspected["requirements_bytes"],
-                    )
                     if requirements_changed:
-                        if not _pip_install_allowed():
-                            restored = await _rollback_if_needed()
-                            if restored:
-                                yield (
-                                    "data: ERROR:新版依赖清单有变化，自动 pip 安装处于关闭状态；"
-                                    "为避免重启后缺包，已回滚本次热更新。请重建镜像，或明确设置 "
-                                    "OMBRE_UPDATE_ALLOW_PIP=1 后重试。\n\n"
-                                )
-                            else:
-                                yield "data: ERROR:依赖发生变化且自动安装关闭，回滚失败，请手动恢复 _prev。\n\n"
-                            return
-
-                        yield "data: 依赖清单有变化，正在 pip install…\n\n"
-                        pip_result = await _await_update_worker(
-                            _install_update_requirements,
-                            os.path.join(repo_root, "requirements.txt"),
-                            inspected["requirements_bytes"],
+                        install_lock = bool(
+                            requirements_lock_bytes
+                            and requirements_lock_bytes.strip()
                         )
-                        if pip_result.returncode != 0:
-                            restored = await _rollback_if_needed()
-                            state = "已回滚" if restored else "回滚失败"
-                            yield f"data: ERROR:依赖安装失败，{state}；服务不会重启。\n\n"
-                            return
-                        yield "data: 依赖安装完成…\n\n"
+                        install_name = (
+                            "requirements.lock.txt"
+                            if install_lock
+                            else "requirements.txt"
+                        )
+                        install_bytes = (
+                            requirements_lock_bytes
+                            if install_lock
+                            else requirements_bytes
+                        )
+                        if not install_bytes:
+                            raise ValueError("更新包缺少可安装的依赖清单")
+
+                    await _await_update_worker(
+                        _sync_update_dependency_manifests,
+                        repo_root,
+                        requirements_bytes,
+                        requirements_lock_bytes,
+                    )
                 except Exception as requirements_error:
                     restored = await _rollback_if_needed()
                     state = "已回滚" if restored else "回滚失败"
@@ -1051,6 +1299,27 @@ def register(mcp) -> None:
                         yield "data: ⚠️ 自动还原失败，请检查 _prev 备份目录并手动恢复。\n\n"
                     yield "data: ERROR:更新已中止（新代码自检失败，已回滚，未重启）\n\n"
                     return
+
+                if requirements_changed:
+                    yield "data: 依赖清单有变化，正在 pip install…\n\n"
+                    try:
+                        pip_result = await _await_update_worker(
+                            _install_update_requirements,
+                            os.path.join(repo_root, install_name),
+                            install_bytes,
+                            require_hashes=install_lock,
+                        )
+                    except Exception as requirements_error:
+                        restored = await _rollback_if_needed()
+                        state = "已回滚" if restored else "回滚失败"
+                        yield f"data: ERROR:依赖处理失败（{requirements_error}），{state}。\n\n"
+                        return
+                    if pip_result.returncode != 0:
+                        restored = await _rollback_if_needed()
+                        state = "已回滚" if restored else "回滚失败"
+                        yield f"data: ERROR:依赖安装失败，{state}；服务不会重启。\n\n"
+                        return
+                    yield "data: 依赖安装完成…\n\n"
 
                 # Remove the downloaded ZIP before handing the reservation to
                 # the restart task.  This also keeps failed/successful updates
@@ -1134,6 +1403,92 @@ def register(mcp) -> None:
             return JSONResponse({"ok": True, **result})
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @mcp.custom_route(
+        "/api/maintenance/restore-archived-letters",
+        methods=["GET", "POST"],
+    )
+    async def api_restore_archived_letters(request: Request) -> Response:
+        """审计并显式恢复带强来源标记的历史误归档 Letter。
+
+        GET 永远只做 dry-run。POST 必须给出非空、受限的 ``ids`` 字符串列表；
+        维护 helper 的扫描结果不构成写授权，存储层会在桶租约内重新校验。
+        """
+        from starlette.responses import JSONResponse
+
+        def no_store_json(payload: dict, *, status_code: int = 200) -> Response:
+            return JSONResponse(
+                payload,
+                status_code=status_code,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        err = sh._require_auth(request)
+        if err:
+            err.headers["Cache-Control"] = "no-store"
+            return err
+        from tools._common import restore_archived_letters
+
+        ids: list[str] | None = None
+        apply = request.method == "POST"
+        if apply:
+            try:
+                body = await sh._read_json_object(request)
+            except Exception:
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_json"},
+                    status_code=400,
+                )
+            raw_ids = body.get("ids")
+            if (
+                not isinstance(raw_ids, list)
+                or not raw_ids
+                or len(raw_ids) > _ARCHIVED_LETTER_RESTORE_MAX_IDS
+            ):
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_ids"},
+                    status_code=400,
+                )
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for value in raw_ids:
+                if not isinstance(value, str):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_ids"},
+                        status_code=400,
+                    )
+                bucket_id = value.strip()
+                if (
+                    not bucket_id
+                    or len(bucket_id) > _ARCHIVED_LETTER_RESTORE_ID_MAX_CHARS
+                ):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_ids"},
+                        status_code=400,
+                    )
+                if bucket_id not in seen:
+                    seen.add(bucket_id)
+                    normalized.append(bucket_id)
+            if not normalized:
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_ids"},
+                    status_code=400,
+                )
+            ids = normalized
+
+        try:
+            result = await restore_archived_letters(
+                sh.bucket_mgr,
+                ids=ids,
+                apply=apply,
+            )
+            return no_store_json({"ok": True, **result})
+        except Exception:
+            sh.logger.exception("历史归档 Letter 维护失败")
+            return no_store_json(
+                {"ok": False, "reason": "internal_error"},
+                status_code=500,
+            )
 
     @mcp.custom_route("/api/author", methods=["GET"])
     async def api_author(request: Request) -> Response:

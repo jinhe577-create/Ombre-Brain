@@ -18,13 +18,15 @@ from typing import Any, Awaitable, Callable, Mapping
 import httpx
 from starlette.middleware.cors import CORSMiddleware
 
-from public_origin import configured_public_origin, normalize_public_origin
+from ombrebrain.security.public_origin import (
+    configured_public_origin,
+    normalize_public_origin,
+)
 from utils import parse_bool
 from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
     ManagementRequestBodyLimitMiddleware,
     is_mcp_endpoint_path,
-    is_sse_endpoint_path,
 )
 
 
@@ -45,8 +47,7 @@ class HTTPRuntimeSettings:
     auth_required: bool
     max_request_bytes: int
     max_management_request_bytes: int = DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES
-    # "oauth" (default) or "token" — only consulted when auth_required is True.
-    # Mutually exclusive: see MCPAuthMiddleware and web/oauth.py's route 404s.
+    # "oauth"（默认）、"token" 或 "hybrid"；仅在 auth_required=True 时生效。
     auth_mode: str = "oauth"
     # Canonical external origin captured from the same startup config snapshot
     # used by OAuth route registration.  An empty value means request-derived
@@ -78,7 +79,7 @@ class HTTPRuntimeSettings:
             DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
         )
         auth_mode = str(config.get("mcp_auth_mode", "oauth")).strip().lower()
-        if auth_mode not in ("oauth", "token"):
+        if auth_mode not in ("oauth", "token", "hybrid"):
             auth_mode = "oauth"
         return cls(
             auth_required=parse_bool(
@@ -89,20 +90,6 @@ class HTTPRuntimeSettings:
             auth_mode=auth_mode,
             public_origin=configured_public_origin(config),
         )
-
-
-def merge_mcp_tool_registries(primary: Any, extra: Any) -> int:
-    """Merge FastMCP's compatibility registry into the public registry.
-
-    FastMCP does not currently expose a public registry merge API. Keeping this
-    compatibility access in one function makes the private dependency easy to
-    test and replace when the SDK adds one.
-    """
-
-    primary_tools = primary._tool_manager._tools
-    extra_tools = extra._tool_manager._tools
-    primary_tools.update(extra_tools)
-    return len(extra_tools)
 
 
 def _first_forwarded_value(value: str) -> str:
@@ -192,6 +179,7 @@ class MCPAuthMiddleware:
         *,
         auth_required: bool,
         token_validator: TokenValidator,
+        static_token_validator: TokenValidator | None = None,
         auth_mode: str = "oauth",
         path_matcher: Callable[[object], bool] = is_mcp_endpoint_path,
         resource_path: str = "/mcp",
@@ -200,7 +188,10 @@ class MCPAuthMiddleware:
         self.app = app
         self.auth_required = bool(auth_required)
         self.token_validator = token_validator
-        self.auth_mode = auth_mode if auth_mode in ("oauth", "token") else "oauth"
+        self.static_token_validator = static_token_validator
+        self.auth_mode = (
+            auth_mode if auth_mode in ("oauth", "token", "hybrid") else "oauth"
+        )
         self.path_matcher = path_matcher
         self.resource_path = "/" + str(resource_path or "mcp").strip("/")
         self.public_origin = normalize_public_origin(public_origin)
@@ -209,6 +200,7 @@ class MCPAuthMiddleware:
         path = str(scope.get("path", ""))
         if (
             scope.get("type") == "http"
+            and str(scope.get("method", "")).upper() != "OPTIONS"
             and self.auth_required
             and self.path_matcher(path)
         ):
@@ -216,20 +208,33 @@ class MCPAuthMiddleware:
             auth = headers.get(b"authorization", b"").decode("latin-1")
             base = _canonical_mcp_base(scope, headers, self.public_origin)
             # OAuth discovery currently exposes one canonical MCP resource.
-            # Legacy SSE's /sse and /messages routes are two transport legs of
-            # that same resource, not independently token-bound resources.
             resource = f"{base}{self.resource_path}"
             bearer_token = _extract_bearer_token(auth)
-            valid = bool(bearer_token) and self.token_validator(
-                bearer_token, resource=resource
-            )
-            if not valid and self.auth_mode == "token":
+            valid = False
+            if bearer_token:
+                primary_valid = bool(
+                    self.token_validator(bearer_token, resource=resource)
+                )
+                static_valid = False
+                if self.auth_mode == "hybrid" and self.static_token_validator:
+                    # 两个校验器都执行后再合并结果，避免凭响应时延泄露 Token 类型。
+                    static_valid = bool(
+                        self.static_token_validator(bearer_token, resource=resource)
+                    )
+                valid = primary_valid | static_valid
+            if not valid and self.auth_mode in ("token", "hybrid"):
                 # Fallback header for MCP clients that can't customize Authorization.
                 alt_token = headers.get(b"ombre-mcp-token", b"").decode(
                     "latin-1"
                 ).strip()
                 if alt_token:
-                    valid = self.token_validator(alt_token, resource=resource)
+                    static_validator = self.static_token_validator
+                    if static_validator is None and self.auth_mode == "token":
+                        # 保留旧调用方只注入一个 validator 的兼容行为。
+                        static_validator = self.token_validator
+                    valid = bool(static_validator) and static_validator(
+                        alt_token, resource=resource
+                    )
             if not valid:
                 endpoint = self.resource_path.strip("/")
                 if self.auth_mode == "token":
@@ -273,10 +278,15 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-class MCPAcceptShim:
-    """Ensure MCP clients advertise both supported response media types."""
+class MCPJSONAcceptShim:
+    """为省略或通配 ``Accept`` 的 Streamable HTTP 客户端选择 JSON。
 
-    _REQUIRED = (b"application/json", b"text/event-stream")
+    FastMCP 会按 MCP 规范拒绝没有明确声明响应媒体类型的 POST。部分简化
+    客户端只发送浏览器/HTTP 库默认的 ``*/*``，虽然它在 HTTP 语义上本就
+    接受 JSON，却会因此在 ``tools/list`` 前收到 406。这里只把“缺失”补成
+    JSON、把通配范围补充为 JSON；显式只接受 SSE 等媒体类型时保持原样，
+    避免向客户端返回它没有声明能够解析的响应。
+    """
 
     def __init__(
         self,
@@ -287,34 +297,62 @@ class MCPAcceptShim:
         self.app = app
         self.path_matcher = path_matcher
 
+    @staticmethod
+    def _wildcard_allows_json(media_range: bytes) -> bool:
+        parts = [part.strip().lower() for part in media_range.split(b";")]
+        if not parts or parts[0] not in (b"*/*", b"application/*"):
+            return False
+        for parameter in parts[1:]:
+            key, separator, value = parameter.partition(b"=")
+            if separator and key.strip() == b"q":
+                try:
+                    quality = float(value.strip())
+                except ValueError:
+                    return False
+                return 0 < quality <= 1
+        return True
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") == "http" and self.path_matcher(
             scope.get("path")
         ):
             headers = list(scope.get("headers", []))
-            accept_index = next(
-                (
-                    index
-                    for index, (key, _value) in enumerate(headers)
-                    if key.lower() == b"accept"
-                ),
-                -1,
+            accept_values = [
+                value
+                for key, value in headers
+                if key.lower() == b"accept"
+            ]
+            combined = b", ".join(accept_values).strip()
+            raw_media_ranges = [
+                item.strip()
+                for item in combined.lower().split(b",")
+                if item.strip()
+            ]
+            media_ranges = [
+                item.split(b";", 1)[0].strip()
+                for item in raw_media_ranges
+            ]
+            has_json = b"application/json" in media_ranges
+            accepts_wildcard = any(
+                self._wildcard_allows_json(item)
+                for item in raw_media_ranges
             )
-            current = headers[accept_index][1].lower() if accept_index >= 0 else b""
-            missing = [value for value in self._REQUIRED if value not in current]
-            if missing:
-                required = b", ".join(missing)
-                if accept_index >= 0 and headers[accept_index][1].strip():
-                    headers[accept_index] = (
-                        headers[accept_index][0],
-                        headers[accept_index][1] + b", " + required,
-                    )
-                elif accept_index >= 0:
-                    headers[accept_index] = (headers[accept_index][0], required)
-                else:
-                    headers.append((b"accept", required))
+
+            if not combined or (accepts_wildcard and not has_json):
+                normalized = (
+                    b"application/json"
+                    if not combined
+                    else combined + b", application/json"
+                )
+                headers = [
+                    (key, value)
+                    for key, value in headers
+                    if key.lower() != b"accept"
+                ]
+                headers.append((b"accept", normalized))
                 scope = dict(scope)
                 scope["headers"] = headers
+
         await self.app(scope, receive, send)
 
 
@@ -497,6 +535,7 @@ class RuntimeLifecycle:
     logger: Any
     decay_engine: Any = None
     embedding_outbox: Any = None
+    you_service: Any = None
     ensure_ollama_child: AsyncCallback | None = None
     stop_ollama_child: AsyncCallback | None = None
     load_tunnel_config: Callable[[], Mapping[str, Any]] | None = None
@@ -576,6 +615,10 @@ class RuntimeLifecycle:
             "embedding outbox start",
             getattr(self.embedding_outbox, "start", None),
         )
+        await self._run_async_step(
+            "You service start",
+            getattr(self.you_service, "start", None),
+        )
         if self.keepalive_url:
             self._keepalive_task = asyncio.create_task(
                 self._keepalive_loop(),
@@ -601,6 +644,10 @@ class RuntimeLifecycle:
             except Exception as exc:
                 self.logger.warning("github auto-sync stop failed: %s", exc)
 
+        await self._run_async_step(
+            "You service stop",
+            getattr(self.you_service, "stop", None),
+        )
         await self._run_async_step(
             "embedding outbox stop",
             getattr(self.embedding_outbox, "stop", None),
@@ -642,28 +689,20 @@ def build_http_app(
     settings: HTTPRuntimeSettings,
     token_validator: TokenValidator,
     lifecycle: RuntimeLifecycle,
+    static_token_validator: TokenValidator | None = None,
 ) -> Any:
-    """Build the HTTP/SSE ASGI app with one consistent middleware stack."""
+    """Build the HTTP (streamable-http) ASGI app with one consistent middleware stack."""
 
     if transport == "streamable-http":
         app = mcp.streamable_http_app()
-    elif transport == "sse":
-        app = mcp.sse_app()
     else:
         raise ValueError(f"HTTP app cannot be built for transport: {transport}")
 
-    mcp_path_matcher = (
-        is_sse_endpoint_path if transport == "sse" else is_mcp_endpoint_path
-    )
+    mcp_path_matcher = is_mcp_endpoint_path
 
+    # 3.4.0 起只有一个连接器，`install_extra_connector`（并入 /mcp-extra 的路由
+    # 与 session manager 生命周期）随之删除。
     install_runtime_lifespan(app, lifecycle)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
     app.add_middleware(
         OriginCSRFGuardMiddleware,
         mcp_path_matcher=mcp_path_matcher,
@@ -679,15 +718,36 @@ def build_http_app(
         max_bytes=settings.max_management_request_bytes,
         mcp_path_matcher=mcp_path_matcher,
     )
-    app.add_middleware(MCPAcceptShim, path_matcher=mcp_path_matcher)
+    if transport == "streamable-http":
+        app.add_middleware(
+            MCPJSONAcceptShim,
+            path_matcher=mcp_path_matcher,
+        )
     app.add_middleware(
         MCPAuthMiddleware,
         auth_required=settings.auth_required,
         token_validator=token_validator,
+        static_token_validator=static_token_validator,
         auth_mode=settings.auth_mode,
         path_matcher=mcp_path_matcher,
         resource_path="/mcp",
         public_origin=settings.public_origin,
+    )
+    # Starlette wraps middleware in reverse registration order.  CORS must be
+    # outside MCP auth so browser preflights never receive a bare 401 and auth
+    # challenges/errors still carry the appropriate CORS response headers.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        # 携带凭据时，部分浏览器不把通配符视为可读响应头。
+        # 显式暴露 MCP/OAuth 排障需要的字段。
+        expose_headers=[
+            "Mcp-Session-Id",
+            "WWW-Authenticate",
+            "Ngrok-Skip-Browser-Warning",
+        ],
     )
     # Outermost: must still fire on auth-rejected/error responses, not just
     # successful tool calls, so add it last (see NgrokHeaderMiddleware).

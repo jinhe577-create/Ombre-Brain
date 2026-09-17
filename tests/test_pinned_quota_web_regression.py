@@ -3,7 +3,6 @@ import json
 
 import pytest
 
-from tools import _common as common
 from tools import _runtime as rt
 from web import _shared as sh
 from web import buckets as buckets_web
@@ -62,6 +61,7 @@ class FakeBucketManager:
         return self.rows.get(bucket_id)
 
     async def update(self, bucket_id, **updates):
+        updates.pop("event_actor", None)
         self.updates.append((bucket_id, updates))
         self.rows[bucket_id]["metadata"].update(updates)
         return True
@@ -106,6 +106,66 @@ async def test_bucket_pin_route_rejects_new_pin_when_quota_is_full(pinned_quota_
 
 
 @pytest.mark.asyncio
+async def test_bucket_pin_route_rejects_archived_bucket(pinned_quota_runtime):
+    metadata = pinned_quota_runtime.rows["plain"]["metadata"]
+    metadata["type"] = "archived"
+    mcp = FakeMcp()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes["/api/bucket/{bucket_id}/pin"](
+        FakeRequest(path_params={"bucket_id": "plain"})
+    )
+
+    assert response.status_code == 409
+    assert metadata["type"] == "archived"
+    assert metadata["pinned"] is False
+    assert pinned_quota_runtime.updates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_pin_route_rejects_protected_bucket_before_quota_check(
+    pinned_quota_runtime,
+):
+    metadata = pinned_quota_runtime.rows["plain"]["metadata"]
+    metadata["protected"] = True
+    mcp = FakeMcp()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes["/api/bucket/{bucket_id}/pin"](
+        FakeRequest(path_params={"bucket_id": "plain"})
+    )
+
+    payload = _json(response)
+    assert response.status_code == 409
+    assert payload["conflict"] == "pinned_protected_mutually_exclusive"
+    assert metadata["pinned"] is False
+    assert metadata["protected"] is True
+    assert pinned_quota_runtime.updates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_pin_route_can_unpin_historical_pinned_protected_state(
+    pinned_quota_runtime,
+):
+    metadata = pinned_quota_runtime.rows["already-pinned"]["metadata"]
+    metadata["protected"] = True
+    mcp = FakeMcp()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes["/api/bucket/{bucket_id}/pin"](
+        FakeRequest(path_params={"bucket_id": "already-pinned"})
+    )
+
+    assert response.status_code == 200
+    assert _json(response)["pinned"] is False
+    assert metadata["pinned"] is False
+    assert metadata["protected"] is True
+    assert pinned_quota_runtime.updates == [
+        ("already-pinned", {"pinned": False})
+    ]
+
+
+@pytest.mark.asyncio
 async def test_import_review_pin_action_respects_pinned_quota(pinned_quota_runtime):
     mcp = FakeMcp()
     import_api.register(mcp)
@@ -122,23 +182,36 @@ async def test_import_review_pin_action_respects_pinned_quota(pinned_quota_runti
 
 
 @pytest.mark.asyncio
-async def test_import_review_important_action_rejects_when_high_quota_is_full(
-    pinned_quota_runtime,
-    monkeypatch,
-):
-    high = pinned_quota_runtime.rows["already-pinned"]["metadata"]
-    high.update({"pinned": False, "type": "dynamic", "importance": 9})
-    monkeypatch.setattr(common, "_HIGH_IMP_HARD_CAP", 1)
+async def test_import_review_pin_rejects_archived_bucket(pinned_quota_runtime):
+    metadata = pinned_quota_runtime.rows["plain"]["metadata"]
+    metadata["type"] = "archived"
     mcp = FakeMcp()
     import_api.register(mcp)
 
     response = await mcp.routes["/api/import/review"](
-        FakeRequest(body={"decisions": [{"bucket_id": "plain", "action": "important"}]})
+        FakeRequest(body={"decisions": [{"bucket_id": "plain", "action": "pin"}]})
     )
 
     assert response.status_code == 200
     assert _json(response) == {"applied": 0, "errors": 1}
-    assert pinned_quota_runtime.rows["plain"]["metadata"]["importance"] == 5
+    assert metadata["type"] == "archived"
+    assert metadata["pinned"] is False
+    assert pinned_quota_runtime.updates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_unpin_requires_same_request_importance(pinned_quota_runtime):
+    mcp = FakeMcp()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes["/api/bucket/{bucket_id}/pin"](
+        FakeRequest(path_params={"bucket_id": "already-pinned"})
+    )
+
+    assert response.status_code == 400
+    assert "importance" in _json(response)["error"]
+    assert pinned_quota_runtime.rows["already-pinned"]["metadata"]["pinned"] is True
+    assert pinned_quota_runtime.updates == []
 
 
 @pytest.mark.asyncio

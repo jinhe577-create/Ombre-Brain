@@ -10,6 +10,7 @@ import pytest
 
 import github_sync as github_module
 from github_sync import GitHubSync, _LazyMarkdownFiles
+from ombrebrain.storage.source_store import SourceStore
 
 
 def _response(method: str, url: str, status: int, payload: dict) -> httpx.Response:
@@ -34,6 +35,34 @@ def test_collect_files_keeps_paths_not_all_file_bodies(tmp_path):
     first.write_bytes(b"changed")
     assert files["dynamic/a.md"] == b"changed"
     assert all(isinstance(path, str) for path in files._paths.values())
+
+
+def test_collect_files_includes_content_addressed_source_evidence(tmp_path):
+    ref = SourceStore(tmp_path).put("需要与 Markdown 一起备份的原文")
+    sync = GitHubSync(token="t", repo="owner/repo")
+
+    files = sync._collect_files(str(tmp_path))
+
+    relative = f"_sources/{ref}.source"
+    assert relative in files
+    assert files[relative].decode() == "需要与 Markdown 一起备份的原文"
+    manifest = sync._build_backup_manifest(files)
+    assert [entry["path"] for entry in manifest["files"]] == [relative]
+
+
+def test_collect_files_rejects_non_utf8_source_evidence(tmp_path):
+    raw = b"\xff\xfeinvalid"
+    import hashlib
+
+    ref = f"src_{hashlib.sha256(raw).hexdigest()}"
+    source_dir = tmp_path / "_sources"
+    source_dir.mkdir()
+    (source_dir / f"{ref}.source").write_bytes(raw)
+    sync = GitHubSync(token="t", repo="owner/repo")
+    files = sync._collect_files(str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="not UTF-8"):
+        files[f"_sources/{ref}.source"]
 
 
 def test_collect_files_streams_scandir_and_applies_count_cap(tmp_path, monkeypatch):
@@ -166,7 +195,7 @@ async def test_manifest_payload_limit_fails_before_any_tree_write(monkeypatch):
 @pytest.mark.asyncio
 async def test_manual_and_scheduled_syncs_cannot_overlap(monkeypatch):
     sync = GitHubSync(token="t", repo="owner/repo")
-    monkeypatch.setattr(sync, "_collect_files", lambda _root: {"a.md": b"x"})
+    monkeypatch.setattr(sync, "_collect_files", lambda _root, _extra=None: {"a.md": b"x"})
     active = 0
     peak = 0
 

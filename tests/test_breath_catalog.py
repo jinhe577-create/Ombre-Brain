@@ -110,6 +110,80 @@ async def test_catalog_marks_pinned(bucket_mgr):
 
 
 @pytest.mark.asyncio
+async def test_catalog_marks_anchor_and_release_removes_marker(bucket_mgr):
+    bucket_id = await bucket_mgr.create(
+        content="catalog must not expose this anchor body",
+        name="坐标系",
+        domain=["关系"],
+        importance=9,
+    )
+    result = await bucket_mgr.set_anchor(bucket_id, True)
+    assert result["ok"] is True
+    install_runtime(bucket_mgr)
+
+    anchored = await dispatch(catalog=True)
+    anchor_line = next(row for row in anchored.splitlines() if "坐标系" in row)
+
+    assert "⚓ [anchor]" in anchor_line
+    assert "catalog must not expose this anchor body" not in anchored
+
+    result = await bucket_mgr.set_anchor(bucket_id, False)
+    assert result["ok"] is True
+    released = await surface_catalog()
+    released_line = next(row for row in released.splitlines() if "坐标系" in row)
+
+    assert "⚓ [anchor]" not in released_line
+
+
+@pytest.mark.asyncio
+async def test_catalog_parses_anchor_marker_as_explicit_boolean():
+    class Snapshot:
+        def summary(self, _bucket_id, _meta):
+            return "👣 Footprint：无"
+
+    class FakeBucketManager:
+        async def list_all(self, include_archive=False):
+            return [
+                {
+                    "id": "anchor-true",
+                    "content": "hidden body true",
+                    "metadata": {
+                        "name": "真锚点",
+                        "type": "permanent",
+                        "domain": ["测试"],
+                        "importance": 9,
+                        "pinned": "true",
+                        "anchor": "true",
+                    },
+                },
+                {
+                    "id": "anchor-false",
+                    "content": "hidden body false",
+                    "metadata": {
+                        "name": "假锚点",
+                        "type": "dynamic",
+                        "domain": ["测试"],
+                        "importance": 5,
+                        "anchor": "false",
+                    },
+                },
+            ]
+
+        def footprint_snapshot(self):
+            return Snapshot()
+
+    install_runtime(FakeBucketManager())
+
+    out = await surface_catalog()
+    true_line = next(row for row in out.splitlines() if "真锚点" in row)
+    false_line = next(row for row in out.splitlines() if "假锚点" in row)
+
+    assert true_line.startswith("📌⚓ [anchor]")
+    assert "⚓ [anchor]" not in false_line
+    assert "hidden body" not in out
+
+
+@pytest.mark.asyncio
 async def test_dispatch_catalog_short_circuits_other_params(bucket_mgr):
     """catalog=True 时 query/importance_min 一概不生效，也绝不触发 LLM/向量。"""
     await bucket_mgr.create(content="正文", name="目录项", domain=["a"], importance=5)
@@ -131,6 +205,32 @@ async def test_dispatch_catalog_respects_domain_filter(bucket_mgr):
     out = await dispatch(domain="工作", catalog=True)
     assert "工作项" in out
     assert "生活项" not in out
+
+
+@pytest.mark.asyncio
+async def test_dispatch_catalog_respects_tags_and_max_results(bucket_mgr):
+    await bucket_mgr.create(content="x", name="命中高", tags=["拥抱"], importance=9)
+    await bucket_mgr.create(content="y", name="命中低", tags=["拥抱"], importance=5)
+    await bucket_mgr.create(content="z", name="不命中", tags=["其他"], importance=10)
+    install_runtime(bucket_mgr)
+
+    out = await dispatch(tags="拥抱", catalog=True, max_results=1)
+
+    assert "命中高" in out
+    assert "命中低" not in out
+    assert "不命中" not in out
+    assert "1 桶" in out
+
+
+@pytest.mark.asyncio
+async def test_dispatch_catalog_missing_tag_returns_empty(bucket_mgr):
+    await bucket_mgr.create(content="x", name="目录项", tags=["已存在"])
+    install_runtime(bucket_mgr)
+
+    out = await dispatch(tags="definitely_missing", catalog=True, max_results=5)
+
+    assert "没有匹配过滤条件" in out
+    assert "目录项" not in out
 
 
 @pytest.mark.asyncio

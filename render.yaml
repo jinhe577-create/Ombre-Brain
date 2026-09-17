@@ -38,4 +38,4 @@ services:
     disk:
       name: ombre-buckets
       mountPath: /opt/render/project/src/buckets
-      sizeGB: 1              # fork：现有服务磁盘 1GB，云端 embedding API 模式够用；不改避免 Blueprint 触发磁盘变更
+      sizeGB: 5              # Bucket data + derived embedding index; local bge-m3 is not run on Render
